@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>RUNNING</title></head>
+<body>
+<!-- Authless harness for includes/csp-events.js delegation primitives (driven by scripts/csp_browser_test.ps1). -->
+<button id="b1" data-csp-action="fn" data-csp-args='["a",2]'>args</button>
+<button id="b2" data-csp-action="fn" data-csp-el>el</button>
+<button id="b3" data-csp-action="fn" data-csp-event>event</button>
+
+<div id="stopouter" data-csp-action="outer">
+  <input id="inner" type="checkbox" data-csp-stop>
+</div>
+
+<button id="link" data-csp-href="#ok">link</button>
+<button id="innerbtn" data-csp-href="#no" onclick="void 0">
+  <span id="innertext">inner</span>
+</button>
+
+<select id="navsel" data-csp-nav="#nav=">
+  <option value="">none</option>
+  <option value="a b">ab</option>
+</select>
+
+<form id="theform" method="get" action="#">
+  <button id="theformbtn" type="button"></button>
+  <select id="selfilter" data-csp-submit><option>1</option></select>
+</form>
+
+<pre id="out">PENDING</pre>
+
+<script src="includes/csp-events.js"></script>
+<script>
+(function () {
+    var runs = [];
+    window.fn = function () { runs.push('fn:' + Array.prototype.join.call(arguments, ',')); };
+    window.outer = function () { runs.push('outer'); };
+
+    document.getElementById('b1').click();
+    document.getElementById('b2').click();
+    document.getElementById('b3').click();
+
+    document.getElementById('inner').click();
+
+    document.getElementById('link').click();
+    var hashAfterLink = location.hash;
+
+    var beforeInner = location.hash;
+    document.getElementById('innertext').click();
+    var hashUnchangedOnInnerButton = (location.hash === beforeInner);
+
+    var nav = document.getElementById('navsel');
+    nav.value = 'a b';
+    nav.dispatchEvent(new Event('change', { bubbles: true }));
+    var hashAfterNav = location.hash;
+
+    var form = document.getElementById('theform');
+    var submitted = false;
+    form.addEventListener('submit', function (e) { e.preventDefault(); submitted = true; });
+    var sel = document.getElementById('selfilter');
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+
+    document.getElementById('out').textContent = 'RESULT_START' + JSON.stringify({
+        runs: runs,
+        hashAfterLink: hashAfterLink,
+        hashUnchangedOnInnerButton: hashUnchangedOnInnerButton,
+        hashAfterNav: hashAfterNav,
+        submitted: submitted
+    }) + 'RESULT_END';
+    document.title = 'DONE';
+})();
+</script>
+</body>
+</html>

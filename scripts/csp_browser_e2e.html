@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>RUNNING</title></head>
+<body>
+<!-- Authenticated CSP browser E2E harness (scripts/csp_browser_test.ps1 drives it). -->
+<pre id="out">PENDING</pre>
+<script>
+(async function () {
+    const q = new URLSearchParams(location.search);
+    const base = (q.get('base') || '/o').replace(/\/$/, '');
+    const email = q.get('e'), pw = q.get('p');
+    const pages = (q.get('pages') || '').split(',').filter(Boolean).map(function (s) {
+        const parts = s.split('::');
+        return { path: parts[0], fn: parts[1] || null };
+    });
+
+    const results = [];
+    try {
+        const lr = await fetch(base + '/login.php', { credentials: 'same-origin' });
+        const lh = await lr.text();
+        const m = lh.match(/name="csrf_token"\s+value="([A-Za-z0-9]+)"/);
+        const body = new URLSearchParams({ csrf_token: m ? m[1] : '', email, password: pw });
+        const pr = await fetch(base + '/login.php', {
+            method: 'POST', credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body
+        });
+        await pr.text();
+        results.push({ loginInfo: 'csrf=' + (m ? 'yes' : 'no') + ' status=' + pr.status + ' url=' + pr.url });
+    } catch (e) {
+        results.push({ loginInfo: 'ERROR ' + e });
+    }
+
+    function loadPage(path, fn) {
+        return new Promise(function (resolve) {
+            const ifr = document.createElement('iframe');
+            ifr.style.cssText = 'position:absolute;left:-9999px;width:1280px;height:900px';
+            const rec = { page: path };
+            ifr.addEventListener('load', function () {
+                const d = ifr.contentDocument, w = ifr.contentWindow;
+                try {
+                    rec.ready  = d.readyState;
+                    rec.path   = (w.location.pathname || '').split('/').pop();
+                    rec.handlers = d.querySelectorAll(
+                        '[onclick],[onchange],[onsubmit],[oninput],[onload],[onerror],[onkeyup],[onmouseover]'
+                    ).length;
+                    rec.badScripts = Array.prototype.filter.call(
+                        d.querySelectorAll('script:not([src])'),
+                        function (s) { return !s.nonce; }
+                    ).length;
+                    if (fn) { rec['fn:' + fn] = typeof w[fn]; }
+                } catch (e) {
+                    rec.error = String(e);
+                }
+                ifr.remove();
+                resolve(rec);
+            }, { once: true });
+            document.body.appendChild(ifr);
+            ifr.src = base + '/' + path;
+        });
+    }
+
+    for (const p of pages) { results.push(await loadPage(p.path, p.fn)); }
+
+    document.getElementById('out').textContent =
+        'RESULT_START' + JSON.stringify(results) + 'RESULT_END';
+    document.title = 'DONE';
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,45 @@
+# CHED Compliance - Git Ignore
+# Security: never commit secrets
+.env
+.env.*
+!.env.example
+
+# Uploaded files & user content
+/uploads/*
+!/uploads/.htaccess
+/uploads/archived/
+!/uploads/.htaccess
+
+# Logs (all runtime logs, keep folder but ignore content)
+/logs/*
+!/logs/.gitkeep
+*.log
+
+# Email queue / worker
+/logs/email_queue.json
+/logs/email_worker_spawn.lock
+
+# Cache
+/system/storage/cache/*
+!/system/storage/cache/.htaccess
+/system/storage/cache/*.json
+
+# OS & editors
+Thumbs.db
+.DS_Store
+*.swp
+*.bak
+.idea/
+.vscode/
+
+# Node
+node_modules/
+
+# Composer (restore with `composer install`)
+/vendor/
+
+# Temp
+exports/*
+!exports/.htaccess
+preview_cache/
+tmp/

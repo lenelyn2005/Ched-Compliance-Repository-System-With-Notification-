@@ -1,0 +1,18 @@
+# Never serve secrets or VCS to the browser
+<FilesMatch "^\.env">
+    Require all denied
+</FilesMatch>
+
+# Never serve schema dumps, internal reports/notes, tooling sources or backups
+<FilesMatch "\.(sql|md|ps1|lock|bak|log|dist|sample)$">
+    Require all denied
+</FilesMatch>
+
+<FilesMatch "^(composer\.(json|lock)|phpunit\.xml.*)$">
+    Require all denied
+</FilesMatch>
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule (^|/)\.git - [F,L]
+</IfModule>
