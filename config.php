@@ -1296,10 +1296,6 @@ function getAllTeacherProgressForProgramHead(PDO $pdo, int $phId, int $deptId): 
 
 function uploadTeacherPHSubmission(PDO $pdo, int $teacherPHRequirementId, int $teacherId, array $file, ?string $comment = ''): bool|string
 {
-    if (!isset($file['name']) || $file['error'] !== UPLOAD_ERR_OK) {
-        return uploadErrorMessage((int)($file['error'] ?? UPLOAD_ERR_NO_FILE));
-    }
-
     $stmt = $pdo->prepare("
         SELECT phr.title, phr.created_by, phr.deadline, d.id AS dept_id
         FROM teacher_ph_requirements tpr
@@ -1322,75 +1318,25 @@ function uploadTeacherPHSubmission(PDO $pdo, int $teacherPHRequirementId, int $t
         }
     }
 
-    $ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
-    if (!in_array($ext, ALLOWED_EXTENSIONS)) {
-        return "Invalid file type. Allowed: " . ALLOWED_EXTENSIONS_LABEL . ".";
+    // All 7 security layers now live in validateAndStoreUpload() — one
+    // implementation shared by every upload path.
+    $subdir = getFileStorageDir('pending_program_head');
+    $stored = validateAndStoreUpload(
+        $pdo, $file, (string)$req['title'], $subdir,
+        'updoc:phdoc:req:' . $teacherPHRequirementId,
+        fn(PDO $pdo, string $hash) => findDuplicateAssignmentDoc($pdo, 'ph_documents', 'teacher_ph_requirement_id', $teacherPHRequirementId, $hash)
+    );
+    if (is_string($stored)) {
+        return $stored;
     }
-    if ($file['size'] > maxFileSizeBytesFor($ext)) {
-        return "File size must not exceed " . maxFileSizeLabelFor($ext) . ".";
-    }
-    // C-1 fail closed: a false $mime would slip past the allow-list via the
-    // extension fallback map (isDangerousMime(false) === false).
-    $finfo = finfo_open(FILEINFO_MIME_TYPE);
-    $mime = $finfo !== false ? finfo_file($finfo, $file['tmp_name']) : false;
-    if ($finfo !== false) finfo_close($finfo);
-    if ($mime === false) {
-        return "Could not read the uploaded file to verify its type. Please try again.";
-    }
-    if (!in_array($mime, ALLOWED_MIMES)) {
-        if (isDangerousMime($mime)) {
-            return "File content does not match its extension.";
-        }
-        $mimeByExt = [
-            'pdf' => 'application/pdf',
-            'doc' => 'application/msword',
-            'docx' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-            'ppt' => 'application/vnd.ms-powerpoint',
-            'pptx' => 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-            'xls' => 'application/vnd.ms-excel',
-            'xlsx' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            'jpg' => 'image/jpeg',
-            'jpeg' => 'image/jpeg',
-            'png' => 'image/png',
-            'gif' => 'image/gif',
-            'webp' => 'image/webp',
-        ];
-        if (!isset($mimeByExt[$ext])) {
-            return "Invalid file type. Allowed: " . ALLOWED_EXTENSIONS_LABEL . ".";
-        }
-    }
-
-    $hash = hashUploadedTempFile($file);
-    if ($hash === null) {
-        return 'Could not read the uploaded file to verify its contents. Please try again.';
-    }
-    $scopeKey = 'updoc:phdoc:req:' . $teacherPHRequirementId;
-    $locked = acquireUploadLock($pdo, $scopeKey);
-    if ($locked) {
-        register_shutdown_function(function () use ($pdo, $scopeKey) { releaseUploadLock($pdo, $scopeKey); });
-    }
-    if ($hash !== null) {
-        $dupId = findDuplicateAssignmentDoc($pdo, 'ph_documents', 'teacher_ph_requirement_id', $teacherPHRequirementId, $hash);
-        if ($dupId) {
-            logAudit($pdo, 'upload_duplicate_blocked', "Blocked duplicate PH submission for requirement $teacherPHRequirementId (matches doc #$dupId)", 'ph_document', $dupId);
-            return 'This exact file has already been submitted for this requirement. Edit the document and upload it again.';
-        }
-    }
+    $ext = $stored['ext'];
+    $uniqueFile = $stored['filename'];
+    $filepath = UPLOAD_PATH . str_replace('/', DIRECTORY_SEPARATOR, $subdir) . DIRECTORY_SEPARATOR . $uniqueFile;
 
     $stmt = $pdo->prepare("SELECT MAX(version) FROM ph_documents WHERE teacher_ph_requirement_id = ?");
     $stmt->execute([$teacherPHRequirementId]);
     $maxVersion = (int) $stmt->fetchColumn();
     $newVersion = $maxVersion + 1;
-
-    $subdir = getFileStorageDir('pending_program_head');
-    $dirAbs = UPLOAD_PATH . str_replace('/', DIRECTORY_SEPARATOR, $subdir) . DIRECTORY_SEPARATOR;
-    $uniqueFile = allocateStorageFilename($dirAbs, (string)$req['title'], $ext);
-    $filepath = $dirAbs . $uniqueFile;
-
-    if (!move_uploaded_file($file['tmp_name'], $filepath)) {
-        @unlink($filepath);
-        return "Failed to save file. Check upload directory permissions.";
-    }
 
     $stmt = $pdo->prepare("
         INSERT INTO ph_documents (
@@ -1416,7 +1362,6 @@ function uploadTeacherPHSubmission(PDO $pdo, int $teacherPHRequirementId, int $t
         $docId = (int) $pdo->lastInsertId();
         finalizeStorageFilename($pdo, $docId, 'ph_documents', (string)$req['title'], $ext);
         ensureDocumentHash($pdo, 'ph_documents', $docId);
-        if ($locked) releaseUploadLock($pdo, $scopeKey);
         logAudit($pdo, 'teacher_ph_upload', "Teacher uploaded version $newVersion for PH requirement ID $teacherPHRequirementId", 'ph_document', $docId);
 
         $programHead = getUserById($pdo, $req['created_by']);
@@ -1712,10 +1657,6 @@ function programHeadReviewPH(PDO $pdo, int $submissionId, int $programHeadId, st
 // ===========================================================
 function uploadPHDocumentDirect(PDO $pdo, int $phId, ?int $deptId, array $file, string $title, bool $autoForward = false, ?string $description = ''): int|string
 {
-    if (!isset($file['name']) || ($file['error'] ?? UPLOAD_ERR_OK) !== UPLOAD_ERR_OK) {
-        return uploadErrorMessage((int)($file['error'] ?? UPLOAD_ERR_NO_FILE));
-    }
-
     $dupe = $pdo->prepare("
         SELECT id FROM documents
         WHERE title = ? AND archived = 0
@@ -1729,74 +1670,20 @@ function uploadPHDocumentDirect(PDO $pdo, int $phId, ?int $deptId, array $file, 
 
     $subdir = getFileStorageDir('pending_program_head');
     $uploadDir = UPLOAD_PATH . $subdir . DIRECTORY_SEPARATOR;
-    if (!is_dir($uploadDir)) {
-        mkdir($uploadDir, 0755, true);
-    }
 
     $origName = basename($file['name']);
-    $ext = strtolower(pathinfo($origName, PATHINFO_EXTENSION));
-
-    if (!in_array($ext, ALLOWED_EXTENSIONS)) {
-        return 'Invalid file type. Allowed: PDF, DOC, DOCX.';
+    // All 7 security layers now live in validateAndStoreUpload().
+    $stored = validateAndStoreUpload(
+        $pdo, $file, $title, $subdir,
+        'updoc:doc:direct:' . ($deptId !== null ? (int)$deptId : 'null') . ':' . md5($title),
+        fn(PDO $pdo, string $hash) => findDuplicateDirectUpload($pdo, $deptId !== null ? (int)$deptId : null, $title, $hash)
+    );
+    if (is_string($stored)) {
+        return $stored;
     }
-    if ($file['size'] > maxFileSizeBytesFor($ext)) {
-        return 'File too large (max ' . maxFileSizeLabelFor($ext) . ').';
-    }
-    // C-1 fail closed: a false $mime would slip past the allow-list via the
-    // extension fallback map (isDangerousMime(false) === false).
-    $finfo = finfo_open(FILEINFO_MIME_TYPE);
-    $mime = $finfo !== false ? finfo_file($finfo, $file['tmp_name']) : false;
-    if ($finfo !== false) finfo_close($finfo);
-    if ($mime === false) {
-        return "Could not read the uploaded file to verify its type. Please try again.";
-    }
-    if (!in_array($mime, ALLOWED_MIMES)) {
-        if (isDangerousMime($mime)) {
-            return "File content does not match its extension.";
-        }
-        $mimeByExt = [
-            'pdf' => 'application/pdf',
-            'doc' => 'application/msword',
-            'docx' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-            'ppt' => 'application/vnd.ms-powerpoint',
-            'pptx' => 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-            'xls' => 'application/vnd.ms-excel',
-            'xlsx' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            'jpg' => 'image/jpeg',
-            'jpeg' => 'image/jpeg',
-            'png' => 'image/png',
-            'gif' => 'image/gif',
-            'webp' => 'image/webp',
-        ];
-        if (!isset($mimeByExt[$ext])) {
-            return "Invalid file type. Allowed: " . ALLOWED_EXTENSIONS_LABEL . ".";
-        }
-    }
-
-    $hash = hashUploadedTempFile($file);
-    if ($hash === null) {
-        return 'Could not read the uploaded file to verify its contents. Please try again.';
-    }
-    $scopeKey = 'updoc:doc:direct:' . ($deptId !== null ? (int)$deptId : 'null') . ':' . md5($title);
-    $locked = acquireUploadLock($pdo, $scopeKey);
-    if ($locked) {
-        register_shutdown_function(function () use ($pdo, $scopeKey) { releaseUploadLock($pdo, $scopeKey); });
-    }
-    if ($hash !== null) {
-        $dupId = findDuplicateDirectUpload($pdo, $deptId !== null ? (int)$deptId : null, $title, $hash);
-        if ($dupId) {
-            logAudit($pdo, 'upload_duplicate_blocked', "Blocked duplicate direct upload '$title' (matches doc #$dupId)", 'document', $dupId);
-            return 'This exact file has already been uploaded for this requirement. Edit the document and upload it again.';
-        }
-    }
-
-    $filename = allocateStorageFilename($uploadDir, $title, $ext);
+    $ext = $stored['ext'];
+    $filename = $stored['filename'];
     $filePath = $subdir . '/' . $filename;
-
-    if (!move_uploaded_file($file['tmp_name'], $uploadDir . $filename)) {
-        @unlink($uploadDir . $filename);
-        return 'Failed to save uploaded file.';
-    }
 
     $initialStatus = $autoForward ? 'pending_admin' : 'pending_program_head';
     $docStmt = $pdo->prepare("
@@ -1837,7 +1724,6 @@ function uploadPHDocumentDirect(PDO $pdo, int $phId, ?int $deptId, array $file, 
         $docId = (int) $pdo->lastInsertId();
         finalizeStorageFilename($pdo, $docId, 'documents', $title, $ext);
         ensureDocumentHash($pdo, 'documents', $docId);
-        if ($locked) releaseUploadLock($pdo, $scopeKey);
 
         if ($autoForward) {
             $notificationMsg = currentRoleName() . " uploaded and forwarded a document for Admin review: \"$title\"";
@@ -2827,48 +2713,6 @@ function deletePendingDocsForRequirement(PDO $pdo, int $reqId, int $deptId): voi
 
 function uploadTeacherSubmission(PDO $pdo, int $teacherRequirementId, int $teacherId, array $file, ?string $comment = ''): bool|string
 {
-    if (!isset($file['name']) || $file['error'] !== UPLOAD_ERR_OK) {
-        return uploadErrorMessage((int)($file['error'] ?? UPLOAD_ERR_NO_FILE));
-    }
-
-    $ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
-    if (!in_array($ext, ALLOWED_EXTENSIONS)) {
-        return "Invalid file type. Allowed: " . ALLOWED_EXTENSIONS_LABEL . ".";
-    }
-    if ($file['size'] > maxFileSizeBytesFor($ext)) {
-        return "File size must not exceed " . maxFileSizeLabelFor($ext) . ".";
-    }
-    // C-1 fail closed: a false $mime would slip past the allow-list via the
-    // extension fallback map (isDangerousMime(false) === false).
-    $finfo = finfo_open(FILEINFO_MIME_TYPE);
-    $mime = $finfo !== false ? finfo_file($finfo, $file['tmp_name']) : false;
-    if ($finfo !== false) finfo_close($finfo);
-    if ($mime === false) {
-        return "Could not read the uploaded file to verify its type. Please try again.";
-    }
-    if (!in_array($mime, ALLOWED_MIMES)) {
-        if (isDangerousMime($mime)) {
-            return "File content does not match its extension.";
-        }
-        $mimeByExt = [
-            'pdf' => 'application/pdf',
-            'doc' => 'application/msword',
-            'docx' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-            'ppt' => 'application/vnd.ms-powerpoint',
-            'pptx' => 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-            'xls' => 'application/vnd.ms-excel',
-            'xlsx' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            'jpg' => 'image/jpeg',
-            'jpeg' => 'image/jpeg',
-            'png' => 'image/png',
-            'gif' => 'image/gif',
-            'webp' => 'image/webp',
-        ];
-        if (!isset($mimeByExt[$ext])) {
-            return "Invalid file type. Allowed: " . ALLOWED_EXTENSIONS_LABEL . ".";
-        }
-    }
-
     $stmt = $pdo->prepare("
         SELECT dr.department_id, dr.category, dr.document_type, dr.expiration_date, COALESCE(tr.requirement_type, 'admin_requirement') AS requirement_type
         FROM teacher_requirements tr
@@ -2888,37 +2732,24 @@ function uploadTeacherSubmission(PDO $pdo, int $teacherRequirementId, int $teach
     $sourceLabel = ($req['requirement_type'] ?? 'admin_requirement') === 'admin_requirement' ? 'Admin' : 'PH';
     $title = $req['category'] . ' - ' . $req['document_type'];
 
-    $hash = hashUploadedTempFile($file);
-    if ($hash === null) {
-        return 'Could not read the uploaded file to verify its contents. Please try again.';
+    // All 7 security layers now live in validateAndStoreUpload().
+    $subdir = getFileStorageDir('pending_program_head');
+    $stored = validateAndStoreUpload(
+        $pdo, $file, $title, $subdir,
+        'updoc:doc:req:' . $teacherRequirementId,
+        fn(PDO $pdo, string $hash) => findDuplicateAssignmentDoc($pdo, 'documents', 'teacher_requirement_id', $teacherRequirementId, $hash)
+    );
+    if (is_string($stored)) {
+        return $stored;
     }
-    $scopeKey = 'updoc:doc:req:' . $teacherRequirementId;
-    $locked = acquireUploadLock($pdo, $scopeKey);
-    if ($locked) {
-        register_shutdown_function(function () use ($pdo, $scopeKey) { releaseUploadLock($pdo, $scopeKey); });
-    }
-    if ($hash !== null) {
-        $dupId = findDuplicateAssignmentDoc($pdo, 'documents', 'teacher_requirement_id', $teacherRequirementId, $hash);
-        if ($dupId) {
-            logAudit($pdo, 'upload_duplicate_blocked', "Blocked duplicate submission for teacher requirement $teacherRequirementId (matches doc #$dupId)", 'document', $dupId);
-            return 'This exact file has already been submitted for this requirement. Edit the document and upload it again.';
-        }
-    }
+    $ext = $stored['ext'];
+    $uniqueFile = $stored['filename'];
+    $filepath = UPLOAD_PATH . str_replace('/', DIRECTORY_SEPARATOR, $subdir) . DIRECTORY_SEPARATOR . $uniqueFile;
 
     $stmt = $pdo->prepare("SELECT MAX(version) FROM documents WHERE teacher_requirement_id = ?");
     $stmt->execute([$teacherRequirementId]);
     $maxVersion = (int) $stmt->fetchColumn();
     $newVersion = $maxVersion + 1;
-
-    $subdir = getFileStorageDir('pending_program_head');
-    $dirAbs = UPLOAD_PATH . str_replace('/', DIRECTORY_SEPARATOR, $subdir) . DIRECTORY_SEPARATOR;
-    $uniqueFile = allocateStorageFilename($dirAbs, $title, $ext);
-    $filepath = $dirAbs . $uniqueFile;
-
-    if (!move_uploaded_file($file['tmp_name'], $filepath)) {
-        @unlink($filepath);
-        return "Failed to save file. Check upload directory permissions.";
-    }
 
     $stmt = $pdo->prepare("
         INSERT INTO documents (
@@ -2947,7 +2778,6 @@ function uploadTeacherSubmission(PDO $pdo, int $teacherRequirementId, int $teach
         $docId = (int) $pdo->lastInsertId();
         finalizeStorageFilename($pdo, $docId, 'documents', $title, $ext);
         ensureDocumentHash($pdo, 'documents', $docId);
-        if ($locked) releaseUploadLock($pdo, $scopeKey);
         logAudit($pdo, 'teacher_upload', "Teacher uploaded version $newVersion for requirement ID $teacherRequirementId (Type: {$req['requirement_type']}, DocID: $docId)", 'document', $docId);
 
         $programHead = getProgramHeadForDepartment($pdo, $req['department_id']);
@@ -2971,29 +2801,6 @@ function uploadTeacherSubmission(PDO $pdo, int $teacherRequirementId, int $teach
 
 function uploadDepartmentSubmission(PDO $pdo, int $deptRequirementId, int $userId, array $file, ?string $comment = '', ?int $expectedDeptId = null): bool|string
 {
-    if (!isset($file['name']) || $file['error'] !== UPLOAD_ERR_OK) {
-        return uploadErrorMessage((int)($file['error'] ?? UPLOAD_ERR_NO_FILE));
-    }
-
-    $ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
-    if (!in_array($ext, ALLOWED_EXTENSIONS)) {
-        return "Only PDF, DOC, and DOCX files are allowed.";
-    }
-    if ($file['size'] > maxFileSizeBytesFor($ext)) {
-        return "File size must not exceed " . maxFileSizeLabelFor($ext) . ".";
-    }
-    // C-1 fail closed: a false $mime would slip past the allow-list via the
-    // extension fallback map (isDangerousMime(false) === false).
-    $finfo = finfo_open(FILEINFO_MIME_TYPE);
-    $mime = $finfo !== false ? finfo_file($finfo, $file['tmp_name']) : false;
-    if ($finfo !== false) finfo_close($finfo);
-    if ($mime === false) {
-        return "Could not read the uploaded file to verify its type. Please try again.";
-    }
-    if (!in_array($mime, ALLOWED_MIMES)) {
-        return "Invalid file type. Only PDF, DOC, and DOCX are allowed.";
-    }
-
     $stmt = $pdo->prepare("SELECT department_id, category, document_type, expiration_date, cycle_started_at FROM department_requirements WHERE id = ?");
     $stmt->execute([$deptRequirementId]);
     $req = $stmt->fetch();
@@ -3005,29 +2812,29 @@ function uploadDepartmentSubmission(PDO $pdo, int $deptRequirementId, int $userI
         return "Requirement not found.";
     }
 
-    $hash = hashUploadedTempFile($file);
-    if ($hash === null) {
-        return 'Could not read the uploaded file to verify its contents. Please try again.';
-    }
-    $scopeKey = 'updoc:doc:dept:' . (int)$req['department_id'] . ':' . $req['category'] . ':' . $req['document_type'];
-    $locked = acquireUploadLock($pdo, $scopeKey);
-    if ($locked) {
-        register_shutdown_function(function () use ($pdo, $scopeKey) { releaseUploadLock($pdo, $scopeKey); });
-    }
-    if ($hash !== null) {
-        $dupId = findDuplicateDepartmentDoc(
+    $title = $req['category'] . ' - ' . $req['document_type'];
+    // All 7 security layers now live in validateAndStoreUpload(). ponytail:
+    // this path used to reject docx/pptx/xlsx whose bytes finfo reports as
+    // application/zip — now consistent with every other upload path.
+    $subdir = getFileStorageDir('pending_admin');
+    $stored = validateAndStoreUpload(
+        $pdo, $file, $title, $subdir,
+        'updoc:doc:dept:' . (int)$req['department_id'] . ':' . $req['category'] . ':' . $req['document_type'],
+        fn(PDO $pdo, string $hash) => findDuplicateDepartmentDoc(
             $pdo,
             (int)$req['department_id'],
             (string)$req['category'],
             (string)$req['document_type'],
             ($req['cycle_started_at'] === null || $req['cycle_started_at'] === '') ? null : (string)$req['cycle_started_at'],
             $hash
-        );
-        if ($dupId) {
-            logAudit($pdo, 'upload_duplicate_blocked', "Blocked duplicate department submission for req $deptRequirementId (matches doc #$dupId)", 'document', $dupId);
-            return 'This exact file has already been submitted for this requirement in the current cycle. Edit the document and upload it again.';
-        }
+        )
+    );
+    if (is_string($stored)) {
+        return $stored;
     }
+    $ext = $stored['ext'];
+    $uniqueFile = $stored['filename'];
+    $filepath = UPLOAD_PATH . str_replace('/', DIRECTORY_SEPARATOR, $subdir) . DIRECTORY_SEPARATOR . $uniqueFile;
 
     $stmt = $pdo->prepare("
         SELECT MAX(version) FROM documents 
@@ -3036,18 +2843,6 @@ function uploadDepartmentSubmission(PDO $pdo, int $deptRequirementId, int $userI
     $stmt->execute([$req['department_id'], $req['category'], $req['document_type']]);
     $maxVersion = (int) $stmt->fetchColumn();
     $newVersion = $maxVersion + 1;
-
-    $title = $req['category'] . ' - ' . $req['document_type'];
-
-    $subdir = getFileStorageDir('pending_admin');
-    $dirAbs = UPLOAD_PATH . str_replace('/', DIRECTORY_SEPARATOR, $subdir) . DIRECTORY_SEPARATOR;
-    $uniqueFile = allocateStorageFilename($dirAbs, $title, $ext);
-    $filepath = $dirAbs . $uniqueFile;
-
-    if (!move_uploaded_file($file['tmp_name'], $filepath)) {
-        @unlink($filepath);
-        return "Failed to save file. Check upload directory permissions.";
-    }
 
     $stmt = $pdo->prepare("
         INSERT INTO documents (
@@ -3074,7 +2869,6 @@ function uploadDepartmentSubmission(PDO $pdo, int $deptRequirementId, int $userI
         $docId = (int) $pdo->lastInsertId();
         finalizeStorageFilename($pdo, $docId, 'documents', $title, $ext);
         ensureDocumentHash($pdo, 'documents', $docId);
-        if ($locked) releaseUploadLock($pdo, $scopeKey);
         logAudit($pdo, 'program_head_upload', currentRoleName() . " uploaded version $newVersion for requirement ID $deptRequirementId", 'document', $docId);
 
         $pdo->prepare("
