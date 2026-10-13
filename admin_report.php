@@ -1015,8 +1015,6 @@ ob_start();
     /* Stats Grid — parity with admin_dashboard */
     .stats-grid {
         display: grid;
-        /* ponytail: same shrink-proofing as .charts-row — stops the row forcing a
-           page-wide horizontal scrollbar when the sidebar expands. */
         grid-template-columns: repeat(5, minmax(0, 1fr));
         gap: 0.75rem;
     }
@@ -1339,10 +1337,6 @@ ob_start();
     /* Charts Row — premium cards */
     .charts-row {
         display: grid;
-        /* ponytail: 1fr alone can't shrink below Chart.js's inline canvas px width →
-           sidebar toggle leaves a stuck chart + page-wide h-scrollbar. minmax(0,1fr)
-           lets the card shrink so Chart.js's ResizeObserver fires. Drop it only if
-           charts are ever replaced by non-px-sized elements. */
         grid-template-columns: repeat(3, minmax(0, 1fr));
         gap: 1rem;
         margin-bottom: 1rem;

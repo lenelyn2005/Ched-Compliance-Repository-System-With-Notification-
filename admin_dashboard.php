@@ -182,7 +182,6 @@ autoExpireRequirements($pdo, $_SESSION['user_id'] ?? null);
 $adminId = (int)($_SESSION['admin_id'] ?? 0);
 $expiredReqs = getExpiredRequirements($pdo, $adminId ?: null);
 
-// ponytail: full multi-state query reused from admin_department_requirements.php; no folder/dept filter, no limit. Ceiling: all rows in memory — paginate when list grows past ~500.
 $reqSqlFull = "SELECT dr.*, d.department_name,
     COUNT(DISTINCT tr.id) as total_assigned,
     COUNT(DISTINCT CASE WHEN docs.status = 'approved_admin' THEN docs.id END) as approved_count,
@@ -1873,7 +1872,6 @@ include 'includes/header.php';
         </div>
     </div>
 
-    <!-- ponytail: simplified requirement list; full per-state logic (pending/review/etc) copied from admin_department_requirements.php query — upgrade when admin needs exact delivery-state badges -->
     <div class="card" style="margin-top:1.25rem;">
         <div class="card-header" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.5rem; padding:0.875rem 1.25rem;">
             <h3 style="margin:0; font-size:0.95rem; font-weight:650; color:var(--gray-900); display:flex; align-items:center; gap:0.55rem; letter-spacing:-0.01em;">

@@ -45,8 +45,6 @@ define('UPLOAD_PATH', SECURE_STORAGE_PATH); // alias — all existing code refer
 $MAX_FILE_SIZE      = (int) (getenv('MAX_FILE_SIZE') ?: 100 * 1024 * 1024); // 100MB
 $ALLOWED_EXTENSIONS = array_filter(array_map('trim', explode(',', getenv('ALLOWED_EXTENSIONS')
     ?: 'pdf, doc, docx, jpg, jpeg, png, gif, webp, xls, xlsx, ppt, pptx')));
-// ponytail: ALLOWED_MIMES stays in code — it must match ALLOWED_EXTENSIONS or uploads silently break;
-// upgrade to an extension→mime map when admins need custom types
 $ALLOWED_MIMES      = [
     'application/pdf',
     'application/msword',
@@ -223,10 +221,6 @@ try {
 // Every authenticated request re-checks users.locked_until against the DB.
 // Session variables are never trusted for lockout state: a lock activated in
 // another tab, window, or device must kill this session too.
-// ponytail: revoke-by-recheck, not a session-id registry — a locked account's
-// other sessions die on their NEXT request, not the instant the lock flips.
-// Add a server-side sessions table with mass invalidation if instant
-// multi-tab revocation is ever required.
 if (PHP_SAPI !== 'cli' && !empty($_SESSION['user_id'])) {
     try {
         $enfStmt = $pdo->prepare('SELECT locked_until, active_session_token, active_session_last_seen FROM users WHERE id = ?');
@@ -334,7 +328,6 @@ if (PHP_SAPI !== 'cli' && !empty($_SESSION['user_id'])) {
 // SYSTEM SETTINGS
 // ===========================================================
 // No DB-backed settings table (never had a writer). Values are set here or via .env.
-// ponytail: settings need a code edit to change, add a settings table + admin UI when operators must tune them at runtime
 function getSystemSetting(string $key, $default = null)
 {
     return $default;
@@ -2813,9 +2806,6 @@ function uploadDepartmentSubmission(PDO $pdo, int $deptRequirementId, int $userI
     }
 
     $title = $req['category'] . ' - ' . $req['document_type'];
-    // All 7 security layers now live in validateAndStoreUpload(). ponytail:
-    // this path used to reject docx/pptx/xlsx whose bytes finfo reports as
-    // application/zip — now consistent with every other upload path.
     $subdir = getFileStorageDir('pending_admin');
     $stored = validateAndStoreUpload(
         $pdo, $file, $title, $subdir,
@@ -3218,11 +3208,6 @@ function findDuplicateRepoDoc(PDO $pdo, ?int $deptId, int $phId, string $title, 
 // error message string (same convention as uploadXxxSubmission()).
 // $dupCheck: fn(PDO $pdo, string $hash): ?int — id of an existing identical
 // document, or null when clean.
-// ponytail: dedupe policy differs per upload path (table/keys/title), so it
-// stays a caller-supplied callback; only the plumbing is shared. The old
-// per-ext mime fallback map is omitted — every key of it was already in
-// ALLOWED_EXTENSIONS (layer 2), so it could never change an outcome, and it
-// rejected real docx/pptx (finfo reports application/zip).
 function validateAndStoreUpload(PDO $pdo, array $file, string $title, string $subdir, ?string $lockKey = null, ?callable $dupCheck = null): array|string
 {
     // Layer 1

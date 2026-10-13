@@ -22,7 +22,6 @@ if (!defined('CHED_APP')) exit;
 <?php if (isset($extraScripts)) echo $extraScripts; ?>
 
 
-<!-- # ponytail: universal document viewer (~700 lines HTML/CSS/JS) embedded globally. Upgrade: lazy-load via separate include when preview needed. -->
 <!-- ═══════════════════════════════════════════════════════════════
      SECTION 3 · DOCUMENT VIEWER — HTML
      Single global modal reused for every preview trigger.
@@ -821,9 +820,6 @@ document.addEventListener('DOMContentLoaded', function () {
       return;
     }
 
-    // ponytail: dead branch removed — nothing sets data-path, and the only
-    // download path is preview.php?...&download=1 (line 750). Reintroduce
-    // only if an element actually carries data-path.
   });
 
   /* ── 5.12  KEYBOARD SHORTCUTS ──────────────────────────────── */
@@ -872,7 +868,6 @@ document.addEventListener('DOMContentLoaded', function () {
     }
     return row;
   }
-  // # ponytail: retry loop removed — was 10x 400ms scans. Single attempt; upgrade to observer if dynamic tbody needed.
   var row = find();
   if (row) { row.classList.add('row-highlight'); row.scrollIntoView({ block: 'center' }); }
   setTimeout(function () {

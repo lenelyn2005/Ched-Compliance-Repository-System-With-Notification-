@@ -132,8 +132,6 @@ if ($download) {
     $deptId = $_SESSION['department_id'] ?? null;
     $hasAccess = false;
 
-    // ponytail: no archived hard-deny — history/notifications list archived; normal role checks still apply
-
     if ($role === 'admin') {
         $hasAccess = true;
     } elseif (in_array($role, ['department', 'unit_head'], true) && (($deptId && isset($file['department_id']) && (int)$file['department_id'] === (int)$deptId) || (isset($file['uploaded_by']) ? (int)$file['uploaded_by'] : (isset($file['created_by']) ? (int)$file['created_by'] : 0)) === $userId || ($source === 'ph_document' && !empty($file['teacher_ph_requirement_id'])))) {
@@ -294,8 +292,6 @@ $userId = (int)$_SESSION['user_id'];
 $role = $_SESSION['role'];
 $deptId = $_SESSION['department_id'] ?? null;
 $hasAccess = false;
-
-// ponytail: no archived hard-deny — history/notifications list archived; normal role checks still apply
 
 if ($role === 'admin') {
     $hasAccess = true;

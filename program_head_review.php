@@ -18,8 +18,6 @@ $submissionId = (int)($_POST['submission_id'] ?? 0);
 $action = $_POST['action'] ?? '';
 $comment = trim($_POST['comment'] ?? '');
 $redirect = $_POST['redirect'] ?? 'program_head_pending.php';
-// ponytail: whitelist = simple filename only, no query strings allowed;
-// widen the pattern (e.g. allow \?[a-z_=&0-9]+) if a form ever needs page.php?x=1
 if (!preg_match('/^[a-z0-9_]+\.php$/', $redirect)) {
     $redirect = 'program_head_pending.php';
 }

@@ -314,9 +314,6 @@ $error      = '';
 $lock_remaining = 0;
 $lock_total     = 0;   // ← denominator for the progress bar; set alongside $lock_remaining
 
-// ponytail: cleanup runs on ~1% of GETs so bots hitting /login.php don't get
-// free write amplification. Rows are tiny; delayed pruning is harmless.
-// Upgrade: move to a cron/task-scheduler sweep if the table ever grows large.
 if (random_int(1, 100) === 1) {
     $cleanup_stmt = $pdo->prepare('DELETE FROM login_attempts WHERE attempt_time < ?');
     $cleanup_stmt->execute([time() - 3600]);
@@ -467,8 +464,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             else {
                 logAudit($pdo, 'login_failed', 'Failed login attempt for: ' . $email . ' from IP: ' . $ip);
-                // ponytail: alert fires only on LOCKOUT (3+ failures), not per typo —
-                // raises attacker cost per alert and kills false-positive emails.
 
                 $deviceFailures = countDeviceFailures($pdo, $device_id, DEVICE_LOCKOUT_WINDOW);
                 if ($deviceFailures >= DEVICE_MAX_ATTEMPTS) {

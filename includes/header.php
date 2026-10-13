@@ -1073,7 +1073,6 @@ $hasAvatar     = !empty($headerAvatarUrl);
 
     <?php if (isset($extraStyles)) echo $extraStyles; ?>
 
-    <!-- ponytail: sync, NOT defer - inline page scripts run before deferred files, so CHED.Poller must already exist. -->
     <script src="includes/poller.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
     <script nonce="<?= csp_nonce() ?>">

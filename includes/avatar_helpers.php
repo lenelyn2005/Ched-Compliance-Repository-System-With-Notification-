@@ -220,10 +220,6 @@ if (!function_exists('avatarUpload')) {
 
         // File is named after the uploader: "<Name>_<uid>.<ext>".
         // The uid keeps two users with the same name from sharing one file.
-        // ponytail: deterministic name = same user re-upload overwrites in place;
-        // callers MUST skip deleting the old avatar when old path === new path,
-        // or the fresh upload gets unlinked. Random-name scheme was dropped for
-        // readability; restore it if overwrite-in-place ever causes stale-CDN issues.
         $safeName = preg_replace('/[^A-Za-z0-9_\-]/', '', (string) $name);
         if (!$safeName) {
             $safeName = 'avatar';

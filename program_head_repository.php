@@ -27,9 +27,6 @@ try {
         $ownDeptId = (int) $uRow['dept_id'];
         $_SESSION['department_id'] = $ownDeptId;
     } elseif ($uRow && !empty($uRow['dept_id'])) {
-        // ponytail: department deleted — PH repository is independent; keep the
-        // stale id as scope so rows stay reachable and PH can keep writing.
-        // ceiling: dangling department_id (FK dropped) — upgrade path: soft-delete departments
         $ownDeptId = (int) $uRow['dept_id'];
         $deptGone = true;
     } else {

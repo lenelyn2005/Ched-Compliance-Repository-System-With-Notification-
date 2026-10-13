@@ -754,7 +754,6 @@ $extraScripts .= "
         }
     });
 
-    // # ponytail: real-time SSE removed, re-add only if profiler shows need. Upgrade: cached count or short poll.
 </script>
 ";
 include 'includes/footer.php'; 

@@ -41,8 +41,6 @@ switch ($role) {
     // ---------------------------------------------------------------- admin --
     // Approved documents (repository vs archive) and program head accounts.
     case 'admin':
-        // ponytail: leading-wildcard LIKE = full scan per keystroke. Fine for thousands
-        // of rows; add a FULLTEXT(title, filename) index + MATCH() if that ever changes.
         $docs = $pdo->prepare(
             "SELECT d.id, d.title, d.archived, d.department_id, dep.department_name,
                     'document' AS source, COALESCE(dr.folder_id, 0) AS folder_id
@@ -161,8 +159,6 @@ switch ($role) {
             exit;
         }
 
-        // ponytail: leading-wildcard LIKE = full scan per keystroke, four tables per
-        // query. Add FULLTEXT indexes + MATCH() if a program head ever has thousands.
         $repo = $pdo->prepare(
             "SELECT id, title, filename, folder_id
                FROM ph_repository

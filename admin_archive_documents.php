@@ -70,7 +70,6 @@ function getDepartmentArchiveStats($pdo, $deptId)
 $success = '';
 $error = '';
 $filterDept = isset($_GET['dept']) && is_numeric($_GET['dept']) ? (int) $_GET['dept'] : null;
-// ponytail: array-typed search[]=x would fatal in trim() - treat as empty
 $search = is_string($_GET['search'] ?? '') ? trim($_GET['search']) : '';
 $selectedFolder = isset($_GET['folder']) && is_numeric($_GET['folder']) ? (int) $_GET['folder'] : null;
 
@@ -187,8 +186,6 @@ if (isset($_POST['unarchive']) && is_numeric($_POST['unarchive'])) {
         $pdo->prepare("UPDATE $table SET file_path = ?, archived = 0 WHERE id = ?")
             ->execute([$fileRestored ? $newRelativePath : $doc['file_path'], $id]);
         logAudit($pdo, 'unarchive', ($source === 'ph_document' ? 'PH document' : 'Document') . ' restored from archive: ' . $doc['title'], $source, $id);
-
-        // ponytail: PH notification removed — archive restore is admin-only awareness
 
         $success = $fileRestored ? "Document successfully restored from archive." : "Document restored (file was missing - restored path in DB only).";
     }

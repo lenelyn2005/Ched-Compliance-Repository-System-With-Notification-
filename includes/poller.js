@@ -2,8 +2,6 @@
  * poller.js — Lightweight AJAX polling for live page data.
  * Usage:CHED.Poller.register('tasks', fetchFn, intervalMs)
  * 
- * ponytail: 30s default interval with visibility API pause. Upgrade to
- * WebSocket data-refresh events if polling causes measurable DB load.
  */
 (function () {
     'use strict';
@@ -60,8 +58,5 @@
         }
     });
 
-    // ponytail: no trigger()/_tasks — nothing forces an immediate poll today.
-    // Re-add trigger(id) when a page needs "submit then refresh counts now"
-    // instead of waiting out the interval.
     CHED.Poller = { register, unregister };
 })();

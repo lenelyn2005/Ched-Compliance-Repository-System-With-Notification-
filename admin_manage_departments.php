@@ -33,7 +33,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         ->execute([$name, $code, $description]);
                     $newId = (int) $pdo->lastInsertId();
                     logAudit($pdo, 'create', "Dept created: $name", 'department', $newId);
-                    // ponytail: ensure filesystem dirs + bust cache so admin_department_requirements / admin_manage_document / admin_archive_documents show department immediately (dynamic)
                     // No DB folder auto-created inside department per request — folders are created manually via admin_department_requirements
                     try { createDepartmentFolders($newId, $pdo); } catch (Throwable $e) { error_log('[Dept] create dirs failed: '.$e->getMessage()); }
                     if (function_exists('fileCacheDelete')) { fileCacheDelete('departments_list'); }
@@ -77,13 +76,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $deleteModalError = $error;
                     } else {
                         $deptName = $tmpTarget['department_name'];
-                        // ponytail: only the requirement pages' data is cleared (program_head_requirements / program_head_assign);
-                        // ph_* + documents stay with a dangling department_id so the PH keeps its other pages.
-                        // Ceiling: admin views JOIN departments, so surviving ph_* rows vanish from admin lists —
-                        // re-point them to a new department (or soft-delete flag) if admin must still see them.
                         $pdo->prepare('DELETE FROM teacher_requirements WHERE requirement_id IN (SELECT id FROM department_requirements WHERE department_id = ?)')->execute([$id]);
                         $pdo->prepare('DELETE FROM department_requirements WHERE department_id = ?')->execute([$id]);
-                        // ponytail: teacher accounts are NOT cascade-deleted — only the PH removes them via program_head_teachers.php
                         $pdo->prepare('DELETE FROM departments WHERE id=?')->execute([$id]);
                         try { $pdo->prepare('DELETE FROM department_folders WHERE department_id=?')->execute([$id]); } catch (PDOException $e) {}
                         if (function_exists('fileCacheDelete')) { fileCacheDelete('departments_list'); }

@@ -299,8 +299,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete']) && is_numer
                 mkdir(dirname($newFullPath), 0755, true);
             }
             $hasFile = $oldPath && file_exists($oldPath);
-            // ponytail: archive only when the move succeeds (or there is no
-            // file to move); DB must not claim archived while file is live.
             $fileMoved = !$hasFile || rename($oldPath, $newFullPath);
             if (!$fileMoved) {
                 error_log('[CHED] soft-delete move failed for document ' . $docId . ': ' . $oldPath);
@@ -324,8 +322,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete']) && is_numer
                 mkdir(dirname($newFullPath), 0755, true);
             }
             $hasFile = $oldPath && file_exists($oldPath);
-            // ponytail: move (not copy) — no duplicate file stays in repository;
-            // archive only when the move succeeds.
             $fileMoved = !$hasFile || rename($oldPath, $newFullPath);
             if (!$fileMoved) {
                 error_log('[CHED] soft-delete move failed for PH document ' . $docId . ': ' . $oldPath);
@@ -367,8 +363,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['archive_id']) && is_n
                 mkdir(dirname($newFullPath), 0755, true);
             }
             $hasFile = $oldPath && file_exists($oldPath);
-            // ponytail: move (not copy) — no duplicate file stays in repository;
-            // archive only when the move succeeds.
             $fileMoved = !$hasFile || rename($oldPath, $newFullPath);
             // ph_repository holds its own physical copy, so archiving this document
             // must NOT repoint the repository row — that is left untouched entirely.

@@ -182,7 +182,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         }
         else {
             // Unknown/unrecognized source — block for safety but allow if it matches basic criteria
-            // ponytail: minimal guard; don't over-abstract
             if ($resubmitMode === 'assign') {
                 throw new Exception('Resubmission mode "assign" is not allowed for this document source.');
             }
@@ -551,10 +550,6 @@ $rejectedAllQuery = "
     ORDER BY d.reviewed_at_admin DESC
 ";
 $rejectedAllStmt = $pdo->prepare($rejectedAllQuery);
-// ponytail: ownership is d.uploaded_by, so no department_id filter — a PH who
-// uploaded before being assigned a department has documents.department_id NULL
-// and `= ?` never matches NULL, hiding their rejections. Re-add the filter only
-// if a PH must be restricted to their *current* department's rejections.
 $rejectedAllStmt->execute([$deptId, $deptId, $phId, $phId]);
 $rejectedAll = $rejectedAllStmt->fetchAll();
 

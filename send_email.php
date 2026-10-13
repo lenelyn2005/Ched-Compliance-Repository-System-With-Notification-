@@ -191,7 +191,6 @@ function processEmailQueueBatch(int $limit = 20, int $maxAttempts = 5): array
 
     // One SMTP connection for the whole batch (falls back to per-mail
     // connects inside sendEmail() when the shared connection is unavailable).
-    // ponytail: single shared connection; per-mail reconnect pool only if batch sizes grow past Gmail limits.
     $sharedMailer = mailerConnect();
 
     foreach ($batch as $row) {

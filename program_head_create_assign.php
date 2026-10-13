@@ -57,9 +57,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             $originalFilename = null; $filePath = null;
             if (!empty($_FILES['req_file']['name'])) {
                 $file = $_FILES['req_file'];
-                // Full 7-layer pipeline from config.php. ponytail: templates skip
-                // the duplicate check — ph_requirements has no file_hash column;
-                // add the column + a dup callback when template dedupe matters.
                 $stored = validateAndStoreUpload($pdo, $file, $reqTitle, 'templates/' . $phSlug);
                 if (is_string($stored)) {
                     $error = $stored;

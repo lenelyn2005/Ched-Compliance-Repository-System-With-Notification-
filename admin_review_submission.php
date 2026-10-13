@@ -11,8 +11,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = $_POST['action'] ?? '';
     $comment = trim($_POST['comment'] ?? '');
     $redirect = $_POST['redirect'] ?? 'admin_submissions.php';
-    // ponytail: whitelist = simple filename only, no query strings allowed;
-    // widen the pattern (e.g. allow \?[a-z_=&0-9]+) if a form ever needs page.php?x=1
     if (!preg_match('/^[a-z0-9_]+\.php$/', $redirect)) {
         $redirect = 'admin_submissions.php';
     }
