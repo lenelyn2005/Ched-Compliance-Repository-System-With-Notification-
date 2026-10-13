@@ -65,11 +65,6 @@ function getAnalyticsData($filters = [])
     $archivedPh = (int) $pdo->query("SELECT COUNT(*) FROM ph_documents pd WHERE pd.archived = 1 AND pd.status = 'approved_admin' AND $datePhFull")->fetchColumn();
     $archived = $archivedDocs + $archivedPh;
 
-    // Submissions queue: pending_admin + program_head_pending, Admin Requirements
-    // only (PH requirements in ph_documents are excluded) so the KPI matches what
-    // admin_submissions.php and program_head_pending.php actually show.
-    // ponytail: teacher_requirement_id is required because getPendingForProgramHead's
-    // version subquery cannot match NULL - such docs never appear on the PH page.
     $pendingDocs = (int) $pdo->query("SELECT COUNT(*) FROM ($docWindow) d
         WHERE d.archived = 0 AND d.status = 'pending_admin'
           AND d.file_path IS NOT NULL AND d.file_path != ''
@@ -95,7 +90,6 @@ function getAnalyticsData($filters = [])
     $approvedActive = (int) $pdo->query("SELECT COUNT(*) FROM ($docWindow) d
         WHERE d.archived = 0 AND d.status = 'approved_admin' AND $dateDocFull AND $deptCondition")->fetchColumn();
 
-    // ponytail: IN list hard-coded; add constant status-set if more statuses introduced
     $rejectedDocs = (int) $pdo->query("SELECT COUNT(*) FROM ($docWindow) d
         WHERE d.archived = 0 AND d.status IN ('rejected_admin','rejected_program_head')
           AND $dateDocFull AND $deptCondition")->fetchColumn();
