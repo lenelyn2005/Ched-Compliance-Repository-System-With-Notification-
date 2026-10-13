@@ -29,6 +29,11 @@ Thumbs.db
 
 # Node
 node_modules/
+/package.json
+/package-lock.json
+
+# Local agent config
+/opencode.json
 
 # Composer (restore with `composer install`)
 /vendor/
