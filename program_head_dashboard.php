@@ -90,99 +90,54 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         exit;
     }
 
+    // Source-aware authorization FIRST: never store or process a resubmit
+    // for a document that is not the uploader's rejected original.
+    $stmt = $pdo->prepare("SELECT d.*, d.source_type AS doc_source_type, d.origin_source AS doc_origin_source FROM documents d WHERE d.id = ? AND d.uploaded_by = ? AND d.status = 'rejected_admin' AND d.archived = 0");
+    $stmt->execute([$docId, $phId]);
+    $originalDoc = $stmt->fetch();
+    if (!$originalDoc) {
+        $_SESSION['error'] = 'Document not found or not authorized. Please ensure the document was rejected by Admin and belongs to you.';
+        header('Location: program_head_dashboard.php');
+        exit;
+    }
+    $teacherReqId = (int)($originalDoc['teacher_requirement_id'] ?? 0);
+
     // Handle file upload (self mode only - assign mode needs no file)
     $uploadDir = UPLOAD_PATH . 'ph_direct' . DIRECTORY_SEPARATOR;
     $file = null; $ext = null; $filePath = null; $fullPath = null;
     if ($resubmitMode === 'self') {
-    if (!is_dir($uploadDir)) {
-        mkdir($uploadDir, 0755, true);
-    }
-
     $file = $_FILES['resubmit_file'];
 
-    // Validate file type using config constants
-    $ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
-    if (($file['error'] ?? UPLOAD_ERR_OK) !== UPLOAD_ERR_OK) {
-        $_SESSION['error'] = 'File upload failed. Please try again.';
+    // Full 7-layer pipeline from config.php: validation, content hash,
+    // duplicate check under a per-document lock, safe move under a
+    // system-generated name (never the uploader's filename). excludeId=0
+    // so an identical copy of the original is also blocked.
+    $stored = validateAndStoreUpload(
+        $pdo,
+        $file,
+        $title,
+        'ph_direct',
+        'updoc:resubmit:' . $docId,
+        fn(PDO $pdo, string $hash) => $teacherReqId > 0
+            ? findDuplicateAssignmentDoc($pdo, 'documents', 'teacher_requirement_id', $teacherReqId, $hash)
+            : findDuplicateDirectUpload($pdo, $deptId, $title, $hash)
+    );
+    if (is_string($stored)) {
+        $_SESSION['error'] = $stored;
         header('Location: program_head_dashboard.php');
         exit;
     }
-    if (!in_array($ext, ALLOWED_EXTENSIONS)) {
-        $_SESSION['error'] = 'Invalid file type. Allowed: ' . ALLOWED_EXTENSIONS_LABEL;
-        header('Location: program_head_dashboard.php');
-        exit;
-    }
-
-    if ($file['size'] > maxFileSizeBytesFor($ext)) {
-        $_SESSION['error'] = 'File size must not exceed ' . maxFileSizeLabelFor($ext) . '.';
-        header('Location: program_head_dashboard.php');
-        exit;
-    }
-
-    // MIME content check (same pattern as config.php upload helpers)
-    // C-1 fail closed: a false $mime is not "dangerous" and would pass this gate.
-    $finfo = finfo_open(FILEINFO_MIME_TYPE);
-    $mime = $finfo !== false ? finfo_file($finfo, $file['tmp_name']) : false;
-    if ($finfo !== false) finfo_close($finfo);
-    if ($mime === false) {
-        $_SESSION['error'] = 'Could not read the uploaded file to verify its type. Please try again.';
-        header('Location: program_head_dashboard.php');
-        exit;
-    }
-    if (!in_array($mime, ALLOWED_MIMES) && isDangerousMime($mime)) {
-        $_SESSION['error'] = 'File content does not match its extension.';
-        header('Location: program_head_dashboard.php');
-        exit;
-    }
-    // ponytail: ext allowlist (line 110) + dangerous-mime gate only; the old
-    // per-ext mime map rejected real docx/pptx (finfo reports application/zip).
-
-    // System filename from official resubmit title (never the uploader's name)
-    $newFilename = allocateStorageFilename($uploadDir, $title, $ext);
+    $ext = $stored['ext'];
+    $newFilename = $stored['filename'];
     $filePath = 'ph_direct/' . $newFilename;
     $fullPath = $uploadDir . $newFilename;
-    // Hash BEFORE move_uploaded_file (tmp file is gone afterwards).
-    $resubmitHash = hashUploadedTempFile($file);
-    }
-
-    if ($resubmitMode === 'self' && !move_uploaded_file($file['tmp_name'], $fullPath)) {
-        if (!empty($fullPath) && file_exists($fullPath)) @unlink($fullPath);
-        $_SESSION['error'] = 'Failed to upload file.';
-        header('Location: program_head_dashboard.php');
-        exit;
     }
 
     try {
         $pdo->beginTransaction();
 
-        // Source-aware authorization: verify actual document/rejection relationship
-        $stmt = $pdo->prepare("SELECT d.*, d.source_type AS doc_source_type, d.origin_source AS doc_origin_source FROM documents d WHERE d.id = ? AND d.uploaded_by = ? AND d.status = 'rejected_admin' AND d.archived = 0");
-        $stmt->execute([$docId, $phId]);
-        $originalDoc = $stmt->fetch();
-
-        if (!$originalDoc) {
-            throw new Exception('Document not found or not authorized. Please ensure the document was rejected by Admin and belongs to you.');
-        }
-
-        // Duplicate-byte guard: block resubmitting identical file content.
-        // excludeId=0 so an identical copy of the original is also blocked.
-        if ($resubmitMode === 'self') {
-            if (empty($resubmitHash)) {
-                throw new Exception('Could not read the uploaded file to verify its contents. Please try again.');
-            }
-            $scopeKey = 'updoc:resubmit:' . $docId;
-            acquireUploadLock($pdo, $scopeKey);
-            register_shutdown_function(fn() => releaseUploadLock($pdo, $scopeKey));
-            $teacherReqId = (int)($originalDoc['teacher_requirement_id'] ?? 0);
-            $dupeId = $teacherReqId > 0
-                ? findDuplicateAssignmentDoc($pdo, 'documents', 'teacher_requirement_id', $teacherReqId, $resubmitHash)
-                : findDuplicateDirectUpload($pdo, $deptId, $title, $resubmitHash);
-            if ($dupeId !== null) {
-                logAudit($pdo, 'upload_duplicate_blocked', "Resubmit blocked: identical file bytes already present (doc #$dupeId) for upload #$docId", 'documents', $docId);
-                throw new Exception('This exact file was already uploaded. Please upload a changed version, or contact the admin.');
-            }
-            releaseUploadLock($pdo, $scopeKey);
-        }
+        // Authorization and the duplicate-byte guard (with lock) already ran
+        // above via validateAndStoreUpload() before anything was stored.
 
         $actualSource = $originalDoc['doc_source_type'] ?? '';
         $actualOrigin = $originalDoc['doc_origin_source'] ?? '';

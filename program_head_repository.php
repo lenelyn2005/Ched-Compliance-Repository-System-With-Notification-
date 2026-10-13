@@ -678,57 +678,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $error = 'Your department was deleted, so you can no longer upload. Ask the administrator to reassign you to a department.';
         } else {
             $file = $_FILES['upload_file'];
-            $ext = strtolower(pathinfo(basename($file['name']), PATHINFO_EXTENSION));
-            if ($file['error'] !== UPLOAD_ERR_OK) {
-                $error = 'File upload error: ' . ($file['error'] ?? 'unknown');
-            } elseif (!in_array($ext, ALLOWED_EXTENSIONS)) {
-                $error = 'Invalid file type. Allowed: ' . ALLOWED_EXTENSIONS_LABEL . '.';
-            } elseif ($file['size'] > maxFileSizeBytesFor($ext)) {
-                $error = 'File too large (max ' . maxFileSizeLabelFor($ext) . ').';
+            $phSlug = phRootSlug($pdo, $phId) ?: ('ph_' . $phId);
+            // Full 7-layer pipeline from config.php: validation, content hash,
+            // duplicate check under a per-(PH, dept) lock, safe move under a
+            // system-generated name.
+            $stored = validateAndStoreUpload(
+                $pdo,
+                $file,
+                $title,
+                'ph_repository/' . $phSlug,
+                'updoc:repo:' . $phId . ':' . $deptId,
+                fn(PDO $pdo, string $hash) => findDuplicateRepoDoc($pdo, $deptId, $phId, $title, $hash)
+            );
+            if (is_string($stored)) {
+                $error = $stored;
             } else {
-                $finfo = finfo_open(FILEINFO_MIME_TYPE);
-                $mime = $finfo !== false ? finfo_file($finfo, $file['tmp_name']) : false;
-                if ($finfo !== false) finfo_close($finfo);
-                // C-1 fail closed: a false $mime is not "dangerous" and would pass.
-                if ($mime === false) {
-                    $error = 'Could not read the uploaded file to verify its type. Please try again.';
-                }
-                // ponytail: extension allowlist (line 642) + dangerous-mime gate only.
-                // A per-ext mime fallback map here rejected real docx/pptx — finfo
-                // reports them as application/zip — and drifts from ALLOWED_EXTENSIONS.
-                // Upgrade path: strict ext→mime comparison if spoofed uploads matter.
-                if (isDangerousMime($mime)) {
-                    $error = 'Invalid file type. Allowed: ' . ALLOWED_EXTENSIONS_LABEL . '.';
-                }
-            }
-            if (empty($error)) {
-                $repoHash = hashUploadedTempFile($file);
-                if ($repoHash === null) {
-                    $error = 'Could not read the uploaded file to verify its contents. Please try again.';
-                } else {
-                    $dup = $pdo->prepare("SELECT id FROM ph_repository WHERE department_id <=> ? AND program_head_id = ? AND title = ? AND file_hash = ? LIMIT 1");
-                    $dup->execute([$deptId, $phId, $title, $repoHash]);
-                    if ($dup->fetch()) {
-                        $error = 'This exact file already exists in your repository for this title.';
-                    }
-                }
-            }
-            if (empty($error)) {
+                $repoHash = $stored['hash'];
+                $ext = $stored['ext'];
+                $filename = $stored['filename'];
+                $filePath = 'ph_repository/' . $phSlug . '/' . $filename;
+                $uploadDir = UPLOAD_PATH . 'ph_repository' . DIRECTORY_SEPARATOR . $phSlug . DIRECTORY_SEPARATOR;
                 $folderId = !empty($_POST['folder_id']) ? (int)$_POST['folder_id'] : null;
                 if ($folderId !== null && $folderId > 0) {
                     $chk = $pdo->prepare("SELECT id FROM ph_repo_folders WHERE id = ? AND (department_id = ?) AND program_head_id = ?");
                     $chk->execute([$folderId, $deptId, $phId]);
                     if (!$chk->fetch()) $folderId = null;
                 }
-                $phSlug = phRootSlug($pdo, $phId) ?: ('ph_' . $phId);
-                $uploadDir = UPLOAD_PATH . 'ph_repository' . DIRECTORY_SEPARATOR . $phSlug . DIRECTORY_SEPARATOR;
-                if (!is_dir($uploadDir)) mkdir($uploadDir, 0755, true);
-                $filename = allocateStorageFilename($uploadDir, $title, $ext);
-                $filePath = 'ph_repository/' . $phSlug . '/' . $filename;
-                if (!move_uploaded_file($file['tmp_name'], $uploadDir . $filename)) {
-                    @unlink($uploadDir . $filename);
-                    $error = 'Failed to save uploaded file.';
-                } else {
                     $autoForward = isset($_POST['auto_forward']);
                     try {
                         $ins = $pdo->prepare("INSERT INTO ph_repository (department_id, program_head_id, folder_id, title, filename, file_path, description, forwarded_to_admin, forwarded_at, created_at, file_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?)");
@@ -780,7 +755,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $error = 'Failed to save upload.';
                     }
                 }
-            }
         }
         $redirect = 'program_head_repository.php?folder=' . ($currentFolderId ?? 0);
         if (!empty($success)) $redirect .= '&success=' . urlencode($success);

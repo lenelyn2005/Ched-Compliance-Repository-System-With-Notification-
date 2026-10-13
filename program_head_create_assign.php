@@ -57,32 +57,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             $originalFilename = null; $filePath = null;
             if (!empty($_FILES['req_file']['name'])) {
                 $file = $_FILES['req_file'];
-                $ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
-                if (($file['error'] ?? UPLOAD_ERR_OK) !== UPLOAD_ERR_OK) { $error = 'File upload failed. Please try again.'; }
-                elseif (!in_array($ext, ALLOWED_EXTENSIONS)) { $error = 'Invalid file type.'; } 
-                elseif ($file['size'] > maxFileSizeBytesFor($ext)) { $error = 'File too large (max ' . maxFileSizeLabelFor($ext) . ').'; } 
-                else {
-                    // C-1 fail closed: a false $mime would slip past the allow-list
-                    // via the extension fallback map (isDangerousMime(false) === false).
-                    $finfo = finfo_open(FILEINFO_MIME_TYPE);
-                    $mime = $finfo !== false ? finfo_file($finfo, $file['tmp_name']) : false;
-                    if ($finfo !== false) finfo_close($finfo);
-                    if ($mime === false) {
-                        $error = 'Could not read the uploaded file to verify its type. Please try again.';
-                    } elseif (!in_array($mime, ALLOWED_MIMES)) {
-                        // ponytail: ext allowlist above + dangerous-mime gate only; the
-                        // per-ext mime map rejected real docx/pptx (finfo: application/zip).
-                        if (isDangerousMime($mime)) { $error = 'Invalid file type.'; }
-                    }
-                }
-                if (empty($error)) {
+                // Full 7-layer pipeline from config.php. ponytail: templates skip
+                // the duplicate check — ph_requirements has no file_hash column;
+                // add the column + a dup callback when template dedupe matters.
+                $stored = validateAndStoreUpload($pdo, $file, $reqTitle, 'templates/' . $phSlug);
+                if (is_string($stored)) {
+                    $error = $stored;
+                } else {
                     $originalFilename = $file['name']; // Store original filename for display/audit
-                    $uniqueFilename = allocateStorageFilename($phUploadDir, $reqTitle, $ext);
+                    $ext = $stored['ext'];
+                    $uniqueFilename = $stored['filename'];
                     $filePath = 'templates/' . $phSlug . '/' . $uniqueFilename;
-                    if (!move_uploaded_file($file['tmp_name'], $phUploadDir . $uniqueFilename)) {
-                        @unlink($phUploadDir . $uniqueFilename);
-                        $error = 'Failed to save uploaded file.';
-                    }
                 }
             }
             if (empty($error)) {
@@ -135,38 +120,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             $newFull = null;
             if (!empty($_FILES['req_file']['name'])) {
                 $file = $_FILES['req_file'];
-                $ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
-                if (($file['error'] ?? UPLOAD_ERR_OK) !== UPLOAD_ERR_OK) {
-                    $error = 'File upload failed. Please try again.';
-                } elseif (!in_array($ext, ALLOWED_EXTENSIONS)) {
-                    $error = 'Invalid file type.';
-                } elseif ($file['size'] > maxFileSizeBytesFor($ext)) {
-                    $error = 'File too large (max ' . maxFileSizeLabelFor($ext) . ').';
+                // Full 7-layer pipeline from config.php (see create_requirement
+                // above re: the template duplicate-check ceiling).
+                $stored = validateAndStoreUpload($pdo, $file, $reqTitle, 'templates/' . $phSlug);
+                if (is_string($stored)) {
+                    $error = $stored;
                 } else {
-                    // C-1 fail closed: a false $mime would slip past the allow-list
-                    // via the extension fallback map (isDangerousMime(false) === false).
-                    $finfo = finfo_open(FILEINFO_MIME_TYPE);
-                    $mime = $finfo !== false ? finfo_file($finfo, $file['tmp_name']) : false;
-                    if ($finfo !== false) finfo_close($finfo);
-                    if ($mime === false) {
-                        $error = 'Could not read the uploaded file to verify its type. Please try again.';
-                    } elseif (!in_array($mime, ALLOWED_MIMES)) {
-                        // ponytail: ext allowlist above + dangerous-mime gate only; the
-                        // per-ext mime map rejected real docx/pptx (finfo: application/zip).
-                        if (isDangerousMime($mime)) { $error = 'Invalid file type.'; }
-                    }
-                }
-                if (empty($error)) {
-                    $newFilename = allocateStorageFilename($phUploadDir, $reqTitle, $ext);
-                    if (move_uploaded_file($file['tmp_name'], $phUploadDir . $newFilename)) {
-                        $filename = $file['name'];
-                        $filePath = 'templates/' . $phSlug . '/' . $newFilename;
-                        $replacedOldPath = $old['file_path'];
-                        $newFull = $phUploadDir . $newFilename;
-                    } else {
-                        @unlink($phUploadDir . $newFilename);
-                        $error = 'Failed to save uploaded file.';
-                    }
+                    $ext = $stored['ext'];
+                    $filename = $file['name'];
+                    $filePath = 'templates/' . $phSlug . '/' . $stored['filename'];
+                    $replacedOldPath = $old['file_path'];
+                    $newFull = $phUploadDir . $stored['filename'];
                 }
             }
             if (empty($error)) {

@@ -84,7 +84,8 @@ $NOTIFICATION_EMAIL_ENABLED = [
     'Document Returned by Admin for Correction' => true,
     'Document Restored' => false,
     'Welcome to CHED Compliance!' => true,
-    'Security Alert: Failed Login Attempts' => true,
+    // In-app only — login security alerts must never hit email.
+    'Security Alert: Failed Login Attempts' => false,
 ];
 
 // SMTP settings for PHPMailer — single source: .env → env_loader → getSmtpConfig → PHPMailer
@@ -3401,6 +3402,82 @@ function findDuplicateDirectUpload(PDO $pdo, ?int $deptId, string $title, string
     $stmt->execute([$hash, $title, $deptId, $excludeId]);
     $id = $stmt->fetchColumn();
     return $id !== false ? (int)$id : null;
+}
+
+function findDuplicateRepoDoc(PDO $pdo, ?int $deptId, int $phId, string $title, string $hash): ?int
+{
+    if ($hash === '') return null;
+    $stmt = $pdo->prepare("SELECT id FROM ph_repository WHERE department_id <=> ? AND program_head_id = ? AND title = ? AND file_hash = ? LIMIT 1");
+    $stmt->execute([$deptId, $phId, $title, $hash]);
+    $id = $stmt->fetchColumn();
+    return $id !== false ? (int)$id : null;
+}
+
+// ===========================================================
+// SHARED UPLOAD PIPELINE — the 7 security layers, one implementation
+// ===========================================================
+
+// Layers 1-7: upload error -> ext allow-list -> size cap -> MIME sniff
+// (fail closed) -> dangerous-MIME gate -> content hash + duplicate check
+// under a lock -> move_uploaded_file under a system-generated name.
+// Returns ['ext' => ..., 'hash' => ..., 'filename' => ...] on success, or an
+// error message string (same convention as uploadXxxSubmission()).
+// $dupCheck: fn(PDO $pdo, string $hash): ?int — id of an existing identical
+// document, or null when clean.
+// ponytail: dedupe policy differs per upload path (table/keys/title), so it
+// stays a caller-supplied callback; only the plumbing is shared. The old
+// per-ext mime fallback map is omitted — every key of it was already in
+// ALLOWED_EXTENSIONS (layer 2), so it could never change an outcome, and it
+// rejected real docx/pptx (finfo reports application/zip).
+function validateAndStoreUpload(PDO $pdo, array $file, string $title, string $subdir, ?string $lockKey = null, ?callable $dupCheck = null): array|string
+{
+    // Layer 1
+    if (!isset($file['name']) || ($file['error'] ?? UPLOAD_ERR_OK) !== UPLOAD_ERR_OK) {
+        return uploadErrorMessage((int)($file['error'] ?? UPLOAD_ERR_NO_FILE));
+    }
+    // Layer 2
+    $ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
+    if (!in_array($ext, ALLOWED_EXTENSIONS)) {
+        return "Invalid file type. Allowed: " . ALLOWED_EXTENSIONS_LABEL . ".";
+    }
+    // Layer 3
+    if ($file['size'] > maxFileSizeBytesFor($ext)) {
+        return "File size must not exceed " . maxFileSizeLabelFor($ext) . ".";
+    }
+    // Layer 4 — C-1 fail closed: a false $mime would slip past the gates below.
+    $finfo = finfo_open(FILEINFO_MIME_TYPE);
+    $mime = $finfo !== false ? finfo_file($finfo, $file['tmp_name']) : false;
+    if ($finfo !== false) finfo_close($finfo);
+    if ($mime === false) {
+        return "Could not read the uploaded file to verify its type. Please try again.";
+    }
+    // Layer 5
+    if (!in_array($mime, ALLOWED_MIMES) && isDangerousMime($mime)) {
+        return "File content does not match its extension.";
+    }
+    // Layer 6 — hash BEFORE the move in layer 7 (the tmp file is gone after it).
+    $hash = hashUploadedTempFile($file);
+    if ($hash === null) {
+        return 'Could not read the uploaded file to verify its contents. Please try again.';
+    }
+    if ($lockKey !== null && acquireUploadLock($pdo, $lockKey)) {
+        register_shutdown_function(fn() => releaseUploadLock($pdo, $lockKey));
+    }
+    if ($dupCheck !== null) {
+        $dupId = $dupCheck($pdo, $hash);
+        if ($dupId !== null) {
+            logAudit($pdo, 'upload_duplicate_blocked', "Blocked duplicate upload [$lockKey] — matches doc #$dupId", 'upload', $dupId);
+            return 'This exact file has already been uploaded. Please upload a changed version.';
+        }
+    }
+    // Layer 7
+    $dirAbs = UPLOAD_PATH . str_replace('/', DIRECTORY_SEPARATOR, $subdir) . DIRECTORY_SEPARATOR;
+    $filename = allocateStorageFilename($dirAbs, $title, $ext);
+    if (!move_uploaded_file($file['tmp_name'], $dirAbs . $filename)) {
+        @unlink($dirAbs . $filename);
+        return "Failed to save file. Check upload directory permissions.";
+    }
+    return ['ext' => $ext, 'hash' => $hash, 'filename' => $filename];
 }
 
 // ===========================================================
