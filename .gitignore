@@ -27,20 +27,8 @@ Thumbs.db
 .idea/
 .vscode/
 
-# Node
-node_modules/
-/package.json
-/package-lock.json
-
-# Local agent config
-/opencode.json
-
 # Composer (restore with `composer install`)
 /vendor/
-
-# Local scripts, agent config
-/scripts/
-/.opencode/
 
 # Temp
 exports/*
