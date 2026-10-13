@@ -1,28 +1,7 @@
 <?php
-// ============================================================
-// DB MIGRATION — run ONCE before deploying this version.
-// Lock expiry columns change from DATETIME to Unix timestamps:
-// -- UPDATE device_lockouts SET locked_until = UNIX_TIMESTAMP(locked_until)
-// --   WHERE locked_until IS NOT NULL;
-// -- UPDATE users SET locked_until = UNIX_TIMESTAMP(locked_until)
-// --   WHERE locked_until IS NOT NULL;
-// -- ALTER TABLE device_lockouts MODIFY locked_until INT UNSIGNED NOT NULL;
-// -- ALTER TABLE users MODIFY locked_until INT UNSIGNED NULL;
-// ============================================================
-
-
-// ponytail: "local" is the TCP peer (REMOTE_ADDR), never HTTP_HOST — a crafted
-// `Host: localhost` must not disable the HTTPS redirect or the Secure flag.
-// Upgrade: behind a TLS-terminating proxy, $is_https needs X-Forwarded-Proto
-// trusted from a proxy IP (mirror getClientIP's $TRUSTED_PROXIES pattern).
 $is_local = in_array($_SERVER['REMOTE_ADDR'] ?? '', ['127.0.0.1', '::1'], true);
 $is_https = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off');
 
-// ponytail: the HTTP->HTTPS redirect only fires when APP_HOST is set and the
-// incoming Host matches it. We never build a Location from the raw Host header
-// (that is an open redirect). With APP_HOST unset there is NO force-HTTPS
-// redirect — set APP_HOST=<yourdomain> in .env to re-enable it. The redirect
-// target is the trusted APP_HOST value, not the request's Host.
 $app_host = getenv('APP_HOST') ?: '';
 if (!$is_local && !$is_https && $app_host !== ''
     && strcasecmp($_SERVER['HTTP_HOST'] ?? '', $app_host) === 0) {
@@ -60,9 +39,6 @@ if (!isset($_SESSION['last_regeneration'])) {
     $_SESSION['last_regeneration'] = time();
 }
 
-// ============================================================
-// 3. CONSTANTS & INCLUDES
-// ============================================================
 define('MAX_ATTEMPTS', 3);          // per-account
 define('LOCKOUT_WINDOW', 300);       // 5 minutes
 
@@ -185,15 +161,6 @@ function accountLockMessage(int $seconds): string {
          . "Please wait {$minutes} minute" . ($minutes > 1 ? 's' : '') . " before trying again.";
 }
 
-// ============================================================
-// SECURITY ALERTS (failed logins / lockouts)
-// ============================================================
-// Emails are ONLY ever sent to the registered address resolved from the users
-// row by id — never to the address typed into the form (that could be a
-// victim's inbox under attacker control, or an arbitrary address).
-
-// ponytail: throttle keyed on in_app_notifications (1 per user per 15 min).
-// Move to a dedicated security_alert_log table if per-channel limits are needed.
 function securityAlertThrottleAllows(PDO $pdo, int $userId): bool {
     $stmt = $pdo->prepare(
         "SELECT COUNT(*) FROM in_app_notifications
@@ -205,30 +172,35 @@ function securityAlertThrottleAllows(PDO $pdo, int $userId): bool {
     return (int) $stmt->fetchColumn() === 0;
 }
 
-function buildSecurityAlertBody(string $ip, string $ua, bool $locked): string {
-    $when  = date('F j, Y \a\t g:i:s A') . ' (Asia/Manila)';
-    $ua    = trim(mb_substr($ua !== '' ? $ua : 'unknown', 0, 255));
-    $intro = $locked
-        ? 'Your CHED Compliance account has been temporarily LOCKED after too many failed login attempts.'
-        : 'Someone failed to log in to your CHED Compliance account.';
-    return $intro . "\n\n"
+
+function buildSecurityAlertBody(string $ip, string $ua): string {
+    $when = date('F j, Y \a\t g:i:s A') . ' (Asia/Manila)';
+    $ua   = trim(mb_substr($ua !== '' ? $ua : 'unknown', 0, 255));
+    return 'Someone has been trying to sign in to a CHED Compliance account, and it has been '
+         . 'temporarily LOCKED after too many failed login attempts.' . "\n\n"
          . "Date & time: {$when}\n"
          . "IP address: {$ip}\n"
          . "Browser / device: {$ua}\n\n"
-         . 'If this was you, wait for the lock to expire and sign in again. If not, someone may be '
-         . 'attempting to access your account — change your password immediately and contact the '
-         . 'system administrator. For your security, this message never contains passwords or codes.';
+         . 'No action is needed unless this activity is unfamiliar — the locked account can sign in '
+         . 'again once the lock expires. For security, this alert never contains passwords, codes, '
+         . 'or account details.';
 }
 
-function sendLoginSecurityAlert(PDO $pdo, int $userId, string $ip, string $ua, bool $locked): void {
+
+// In-app only, sent to every admin — never the affected user, and no email
+// is ever sent for these (see $NOTIFICATION_EMAIL_ENABLED in config.php).
+// The locked account's email is deliberately left out of the body.
+function sendLoginSecurityAlert(PDO $pdo, string $ip, string $ua): void {
     try {
-        createNotification(
-            $pdo,
-            $userId,
-            'Security Alert: Failed Login Attempts',
-            buildSecurityAlertBody($ip, $ua, $locked),
-            'danger'
-        );
+        $body   = buildSecurityAlertBody($ip, $ua);
+        $admins = $pdo->query("SELECT id FROM users WHERE role = 'admin'")->fetchAll();
+        foreach ($admins as $admin) {
+            // Per-recipient throttle: one security alert per admin per 15 min.
+            if (!securityAlertThrottleAllows($pdo, (int) $admin['id'])) {
+                continue;
+            }
+            createNotification($pdo, (int) $admin['id'], 'Security Alert: Failed Login Attempts', $body, 'danger');
+        }
     } catch (Throwable $e) {
         // Alert delivery must NEVER affect authentication or lockout enforcement.
         error_log('[CHED Compliance] Login security alert failed: ' . $e->getMessage());
@@ -443,11 +415,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     activateDeviceLockout($pdo, $device_id, $until, $ip, $user_agent);
                 }
 
-                // Throttled security alert on lockout — must never break authentication.
+                // Security alert fans out to admins (in-app only) — must never break authentication.
                 try {
-                    if (securityAlertThrottleAllows($pdo, (int) $auth['user_id'])) {
-                        sendLoginSecurityAlert($pdo, (int) $auth['user_id'], $ip, $user_agent, true);
-                    }
+                    sendLoginSecurityAlert($pdo, $ip, $user_agent);
                 } catch (Throwable $e) {
                     error_log('[CHED Compliance] Login security alert skipped: ' . $e->getMessage());
                 }
