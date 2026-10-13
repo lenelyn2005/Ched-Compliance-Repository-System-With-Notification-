@@ -10,14 +10,9 @@
 /uploads/archived/
 !/uploads/.htaccess
 
-# Logs (all runtime logs, keep folder but ignore content)
-/logs/*
-!/logs/.gitkeep
+# Logs (local only)
+/logs/
 *.log
-
-# Email queue / worker
-/logs/email_queue.json
-/logs/email_worker_spawn.lock
 
 # Cache
 /system/storage/cache/*
@@ -37,6 +32,10 @@ node_modules/
 
 # Composer (restore with `composer install`)
 /vendor/
+
+# Local scripts, agent config
+/scripts/
+/.opencode/
 
 # Temp
 exports/*
