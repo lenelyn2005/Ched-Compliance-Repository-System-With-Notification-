@@ -193,6 +193,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             $phReq = $checkReq->fetch();
             
             if ($phReq) {
+                // Cross-department guard: forged teacher ids from other departments
+                // are dropped — only this department's faculty/staff may be assigned
+                // (same pattern as program_head_dashboard.php:199-206).
+                $teacherIds = array_values(array_unique(array_map('intval', (array) $teacherIds)));
+                if ($teacherIds) {
+                    $tPh = implode(',', array_fill(0, count($teacherIds), '?'));
+                    $tOk = $pdo->prepare("SELECT id FROM users WHERE role IN ('teacher','staff') AND department_id = ? AND id IN ($tPh)");
+                    $tOk->execute(array_merge([$deptId], $teacherIds));
+                    $teacherIds = array_map('intval', array_column($tOk->fetchAll(), 'id'));
+                }
+                if (!$teacherIds) {
+                    $error = 'Selected faculty members are not in your department.';
+                }
                 // Teacher name map (single query instead of one query per teacher)
                 $teacherNameMap = [];
                 foreach ($pdo->query("SELECT id, name FROM users WHERE role IN ('teacher','staff') AND department_id = " . (int)$deptId)->fetchAll() as $nu) {
@@ -279,18 +292,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 
     if ($action === 'unassign_ph_req') {
         $phReqId = (int)$_POST['ph_req_id'];
-        $tStmt = $pdo->prepare("SELECT teacher_id FROM teacher_ph_requirements WHERE ph_requirement_id = ?");
-        $tStmt->execute([$phReqId]);
-        $assignedTeachers = $tStmt->fetchAll(PDO::FETCH_COLUMN);
-        $titleStmt = $pdo->prepare("SELECT title FROM ph_requirements WHERE id = ?");
-        $titleStmt->execute([$phReqId]);
-        $phReqTitle = $titleStmt->fetchColumn() ?: 'requirement';
-        $pdo->prepare("DELETE FROM teacher_ph_requirements WHERE ph_requirement_id = ?")->execute([$phReqId]);
-        $pdo->prepare("UPDATE ph_requirements SET assigned = 0, assigned_at = NULL WHERE id = ?")->execute([$phReqId]);
-        foreach ($assignedTeachers as $tid) {
-            createNotification($pdo, (int)$tid, 'Requirement Unassigned', "You were unassigned from: \"$phReqTitle\".", 'warning');
+        // Ownership guard (same pattern as delete_requirement): never wipe
+        // assignments of a requirement this Program Head doesn't own.
+        $ownStmt = $pdo->prepare("SELECT id FROM ph_requirements WHERE id = ? AND (department_id = ? OR department_id IS NULL) AND created_by = ?");
+        $ownStmt->execute([$phReqId, $deptId, $phId]);
+        if (!$ownStmt->fetch()) {
+            $error = "Requirement not found or you don't have permission to assign it.";
+        } else {
+            $tStmt = $pdo->prepare("SELECT teacher_id FROM teacher_ph_requirements WHERE ph_requirement_id = ?");
+            $tStmt->execute([$phReqId]);
+            $assignedTeachers = $tStmt->fetchAll(PDO::FETCH_COLUMN);
+            $titleStmt = $pdo->prepare("SELECT title FROM ph_requirements WHERE id = ?");
+            $titleStmt->execute([$phReqId]);
+            $phReqTitle = $titleStmt->fetchColumn() ?: 'requirement';
+            $pdo->prepare("DELETE FROM teacher_ph_requirements WHERE ph_requirement_id = ?")->execute([$phReqId]);
+            $pdo->prepare("UPDATE ph_requirements SET assigned = 0, assigned_at = NULL WHERE id = ?")->execute([$phReqId]);
+            foreach ($assignedTeachers as $tid) {
+                createNotification($pdo, (int)$tid, 'Requirement Unassigned', "You were unassigned from: \"$phReqTitle\".", 'warning');
+            }
+            $success = "Requirement unassigned from all faculty.";
         }
-        $success = "Requirement unassigned from all faculty.";
     }
 
     if ($action === 'direct_upload') {
