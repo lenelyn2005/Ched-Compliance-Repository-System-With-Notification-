@@ -56,7 +56,7 @@ function csp_directives(): array
         "font-src 'self' data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://fonts.gstatic.com",
         "img-src 'self' data: blob:",
         "worker-src 'self' blob: https://cdnjs.cloudflare.com",
-        "connect-src 'self'",
+        "connect-src 'self' https://cdn.jsdelivr.net",
         "object-src 'none'",
         "base-uri 'self'",
         "form-action 'self'",

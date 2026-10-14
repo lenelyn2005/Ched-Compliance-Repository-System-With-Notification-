@@ -1923,7 +1923,7 @@ include 'includes/header.php';
     function pollRequirements() {
         fetch(window.location.href, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Requested-With': 'XMLHttpRequest' },
             body: 'ajax_action=get_requirements'
         })
         .then(function(r) { return r.json(); })

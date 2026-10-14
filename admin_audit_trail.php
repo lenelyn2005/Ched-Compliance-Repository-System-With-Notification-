@@ -859,6 +859,7 @@ include 'includes/header.php';
             <input type="hidden" name="delete_all_audit_logs" value="1">
             <div class="form-group">
                 <label for="adminPasswordInput">Admin Password</label>
+                <input type="text" name="username" value="<?= sanitize($_SESSION['email'] ?? '') ?>" autocomplete="username" tabindex="-1" hidden>
                 <input type="password" id="adminPasswordInput" name="admin_password" class="form-control" placeholder="Enter your password" required autocomplete="current-password">
             </div>
             <div id="deleteAuditModalError" class="modal-error" role="alert"></div>

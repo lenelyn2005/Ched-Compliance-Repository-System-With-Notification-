@@ -1314,6 +1314,7 @@ $tabs = [
                         <form method="POST" autocomplete="off" novalidate id="passwordForm">
                             <?= csrfField() ?>
                             <input type="hidden" name="action" value="change_password">
+                            <input type="text" name="username" value="<?= sanitize($_SESSION['email'] ?? '') ?>" autocomplete="username" tabindex="-1" hidden>
                             <div class="as-form-grid">
                                 <div class="as-field">
                                     <label class="as-label" for="as-current-pass">Current Password <span class="as-req" aria-hidden="true">*</span></label>

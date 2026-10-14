@@ -736,6 +736,7 @@ include 'includes/header.php';
                 <?php endif; ?>
                 <div class="umu-modal-field">
                     <label for="umuDeletePass">Confirm with your admin password <span style="color:var(--umu-danger)">*</span></label>
+                    <input type="text" name="username" value="<?= sanitize($_SESSION['email'] ?? '') ?>" autocomplete="username" tabindex="-1" hidden>
                     <input type="password" name="admin_password" id="umuDeletePass" class="umu-input" required placeholder="Enter your password" autocomplete="current-password" style="<?= $deleteModalError ? 'border-color:#C53030' : '' ?>">
                 </div>
                 <p class="umu-modal-warn">This action will permanently remove the user and their access.</p>

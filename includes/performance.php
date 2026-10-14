@@ -178,7 +178,29 @@ function cache_init(): bool
     }
     
     $perf_cache_available = true;
+
+    // Probabilistic GC (~1 in 20 requests): purge expired files so the dir
+    // never needs manual cleanup or a cron job.
+    if (random_int(1, 20) === 1) {
+        cache_gc();
+    }
+
     return true;
+}
+
+function cache_gc(): void
+{
+    $now = time();
+    foreach (new FilesystemIterator(PERF_CACHE_DIR) as $f) {
+        if ($f->getExtension() !== 'json') {
+            continue;
+        }
+        $data = json_decode((string)@file_get_contents($f->getPathname()), true);
+        // Unlink expired or corrupt entries (same rule as cache_get).
+        if (!is_array($data) || !isset($data['expiry']) || $data['expiry'] < $now) {
+            @unlink($f->getPathname());
+        }
+    }
 }
 
 function cache_available(): bool

@@ -1767,6 +1767,7 @@ include 'includes/header.php';
                 <input type="hidden" name="search" value="<?= htmlspecialchars($search) ?>">
                 <?= csrfField() ?>
                 <label for="deleteAdminPassword" style="display:block;margin-bottom:.4rem;font-size:.82rem;font-weight:600;color:var(--gray-600);">Confirm your admin password</label>
+                <input type="text" name="username" value="<?= sanitize($_SESSION['email'] ?? '') ?>" autocomplete="username" tabindex="-1" hidden>
                 <input type="password" id="deleteAdminPassword" name="admin_password" class="form-control" autocomplete="current-password" required style="margin-bottom:1rem;width:100%;padding:.65rem .85rem;border:1px solid var(--border);border-radius:8px;font-family:inherit;font-size:.875rem;">
                 <div style="display: flex; gap: .75rem; justify-content: flex-end;">
                     <button type="button" class="btn btn-outline" data-modal="deleteModal">Cancel</button>

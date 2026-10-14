@@ -520,6 +520,7 @@ include 'includes/header.php';
                 <?php endif; ?>
                 <div style="margin-top:1rem">
                     <label for="umdDeletePass" class="umd-label">Confirm with your admin password <span style="color:#C53030">*</span></label>
+                    <input type="text" name="username" value="<?= sanitize($_SESSION['email'] ?? '') ?>" autocomplete="username" tabindex="-1" hidden>
                     <input type="password" name="admin_password" id="umdDeletePass" class="umd-input" required placeholder="Enter your password" autocomplete="current-password" style="<?= $deleteModalError ? 'border-color:#C53030' : '' ?>">
                 </div>
                 <p class="umd-modal-warn">This action will permanently remove the department and unlink its data.</p>

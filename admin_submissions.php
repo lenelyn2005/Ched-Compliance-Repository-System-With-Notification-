@@ -1465,7 +1465,7 @@ include 'includes/header.php';
     }
 
     CHED.Poller.register('adminSubmissions', function () {
-        return fetch('admin_submissions.php', {
+        return fetch('admin_submissions.php' + window.location.search, {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Requested-With': 'XMLHttpRequest' },
             body: 'action=refresh_submissions'
