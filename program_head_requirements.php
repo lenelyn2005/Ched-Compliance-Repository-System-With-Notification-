@@ -3,10 +3,6 @@ define('CHED_APP', true);
 require_once 'config.php';
 requireDepartment();
 
-// ============================================================================
-// INITIALIZATION
-// ============================================================================
-
 
 $deptId = (int)$_SESSION['department_id'];
 $userId = (int)$_SESSION['user_id'];
@@ -15,18 +11,6 @@ $currentFolderId = isset($_GET['folder']) ? (int)$_GET['folder'] : null;
 $error = '';
 $success = '';
 
-// ============================================================================
-// COMPLETE DETECTION — mirrors admin_department_requirements.php
-// ============================================================================
-// A requirement counts as "Complete" (which the PH page shows as "Approved")
-// only when:
-//   - every assigned teacher's LATEST submission is approved_admin, AND
-//   - no direct PH upload is pending/rejected, AND
-//   - if nobody is assigned, at least one direct PH upload is approved
-//
-// Admin computes this in SQL then renders "Complete". Here we do the same
-// check in PHP on the aggregate columns already returned by the row, so the
-// two pages agree on what "Complete" means without a second round-trip.
 function isRequirementComplete(array $req): bool
 {
     $totalAssigned   = (int)($req['total_assigned'] ?? 0);
@@ -49,14 +33,10 @@ function isRequirementComplete(array $req): bool
             && $directRejected === 0;
     }
 
-    // Nobody assigned: the direct PH upload stands alone
+  
     return $directApproved > 0 && $directPending === 0 && $directRejected === 0;
 }
 
-// Resolve display status + action permissions from DB workflow state.
-// Rules: Assigned → unassign + personal upload; Pending PH/Admin → no reassign,
-// no personal upload; Rejected → personal resubmit + reassign (via unassign).
-// NEW: Complete (aggregate) overrides individual doc status → "Approved".
 function resolvePhReqState(?string $docStatus, $trId, bool $isComplete = false): array
 {
     // Admin sees this as "Complete" → PH sees it as "Approved".

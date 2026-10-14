@@ -10,8 +10,6 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     header('Location: program_head_pending.php');
     exit;
 }
-
-// CSRF verification
 requireCsrfToken();
 
 $submissionId = (int)($_POST['submission_id'] ?? 0);
@@ -28,9 +26,6 @@ if ($action === 'reject' && empty($comment)) {
     exit;
 }
 
-// Verify the submission belongs to a requirement created by this PH and file exists.
-// Keyed on phr.created_by (the PH's identity) exactly like getPendingPHSubmissions —
-// ph_requirements.department_id may be NULL (legit state), which would falsely deny.
 $check = $pdo->prepare("
     SELECT pd.id, pd.file_path, pd.title FROM ph_documents pd
     JOIN teacher_ph_requirements tpr ON pd.teacher_ph_requirement_id = tpr.id

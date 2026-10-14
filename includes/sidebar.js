@@ -1,5 +1,3 @@
-// sidebar.js - Enhanced with accessibility and smooth toggling (header small-arrow integrated)
-
 document.addEventListener('DOMContentLoaded', function () {
   'use strict';
 

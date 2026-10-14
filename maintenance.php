@@ -1,16 +1,4 @@
 <?php
-/**
- * maintenance.php - Scheduled expiration + archive maintenance.
- *
- * Run via cron (Linux) or Task Scheduler (Windows, XAMPP):
- *   php C:\xampp\htdocs\o\maintenance.php
- * Recommended: daily (expiration sync itself is idempotent, safe to run hourly).
- *
- * This is the canonical scheduled entry point for expiration monitoring:
- *   syncExpirationStatuses()  - Active/Expiring/Expired for ALL requirements
- *     document types (documents + ph_documents + department_requirements)
- *     using the single 2-day rule (EXPIRY_WARNING_DAYS).
- */
 define('CHED_APP', true);
 require_once __DIR__ . '/config.php';
 

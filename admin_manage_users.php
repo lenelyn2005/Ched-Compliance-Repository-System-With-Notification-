@@ -2,8 +2,7 @@
 define('CHED_APP', true);
 require_once 'config.php';
 requireAdmin();
-// Editing a PH renames their ph_repository/<name>/ folder, deleting one orphans it —
-// re-home and prune on shutdown so only real program heads hold a folder.
+
 register_shutdown_function(static function () use ($pdo): void {
     syncPhRepository($pdo);
 });

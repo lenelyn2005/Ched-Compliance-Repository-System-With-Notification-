@@ -8,20 +8,8 @@ $phId = (int)$_SESSION['user_id'];
 $error = '';
 $success = '';
 
-// Teacher and Staff are the same account: one creation/edit/delete flow, one set of
-// pages. Only the stored role (and the label it displays as) differs.
 $ROLE_LABELS = ['teacher' => 'Teacher', 'staff' => 'Staff'];
-// Named $facultyRoleLabel, not $roleLabel: header.php/sidebar.php set $roleLabel to a
-// plain string and this page includes them, which turned the call below into a fatal.
 $facultyRoleLabel = static fn(?string $r): string => $ROLE_LABELS[$r] ?? 'Teacher';
-
-// Auto-cleanup: sweep ONLY faculty never linked to any department AND never
-// linked to any head. The previous subquery-driven version mass-deleted every
-// faculty whose creator had been removed — a footgun if a PH is deleted and
-// re-created, or if a migration temporarily strips head roles. This matches
-// the documented intent ("only faculty never linked to any department").
-// Faculty with a dangling program_head_id are kept; the admin can prune them
-// deliberately if needed.
 $orphaned = $pdo->exec("DELETE FROM users WHERE role IN ('teacher','staff') AND department_id IS NULL AND program_head_id IS NULL");
 if ($orphaned) {
     logAudit($pdo, 'auto_delete_orphaned_teacher', "$orphaned orphaned member account(s) removed", 'user', 0);
@@ -92,11 +80,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['delete'])) {
         } else {
             try {
                 if ($id) {
-                    // Update. Scope MUST match the SELECT that renders this page:
-                    //   program_head_id = me  OR  (department_id = me AND program_head_id IS NULL)
-                    // The old "(department_id = me OR department_id IS NULL)" was broader — a
-                    // PH could edit rows the page never showed them (another head's faculty,
-                    // or any department_id IS NULL orphan).
                     if (!empty($password)) {
                         $stmt = $pdo->prepare(
                             'UPDATE users SET name=?, email=?, password=?, role=?, department_id=?, program_head_id=?
@@ -113,9 +96,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['delete'])) {
                         $stmt->execute([$name, $email, $role, $deptId, $phId, $id, $phId, $deptId]);
                     }
                     if ($stmt->rowCount() === 0) {
-                        // 0 rows can mean "not found" OR "no-op update". A no-op is harmless;
-                        // a not-found means the id belongs to a faculty this PH cannot manage.
-                        // Re-check existence to distinguish the two and report honestly.
                         $exists = $pdo->prepare('SELECT id FROM users WHERE id = ?');
                         $exists->execute([$id]);
                         if (!$exists->fetch()) {

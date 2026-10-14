@@ -1,26 +1,3 @@
-/*
- * CHED Compliance - CSP event delegation.
- *
- * Inline event-handler attributes (onclick=, onchange=, ...) are NOT authorised
- * by a script nonce and are blocked once 'unsafe-inline' is removed from
- * script-src. This file replaces them with data-csp-* hooks handled by a single
- * delegated listener:
- *
- *   data-csp-action="fnName"          -> call window.fnName(...)
- *   data-csp-args='[..json..]'        -> arguments passed to window.fnName
- *   data-csp-el                       -> append the element as the last argument
- *   data-csp-event                    -> append the event object as the last argument
- *   data-csp-stop                     -> stopPropagation() and do nothing else
- *   data-csp-href="url"               -> navigate (click), ignoring interactive children
- *   data-csp-submit                   -> submit the closest form (change)
- *   data-csp-nav="prefix"             -> navigate to prefix + encodeURIComponent(value) (change)
- *
- * A private namespace is used so the pre-existing `data-action`/`data-href`
- * hooks (CSS selectors and page-specific JS) are left untouched.
- *
- * The page's own inline <script> (nonce-authorised) still defines the functions;
- * they are global, so window.fnName resolves here.
- */
 (function () {
     'use strict';
 

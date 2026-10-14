@@ -4,8 +4,6 @@ require_once 'config.php';
 
 requireAdmin();
 
-// Auto-archive - run only once per day (admin-only: runs after the guard so
-// anonymous requests cannot trigger a state change)
 $lastArchive = $_SESSION['last_archive_run'] ?? '';
 $today = date('Y-m-d');
 if ($lastArchive !== $today) {
@@ -66,7 +64,9 @@ if ($filterDept) {
     $pendingParams[] = $filterDept;
 }
 if ($filterUploader !== '') {
-    $pendingConditions[] = "d.document_type = 'Direct Upload'";
+    // Filter on the real source column, not the document_type='Direct Upload' proxy:
+    // a requirement literally titled "Direct Upload" would otherwise leak onto this tab.
+    $pendingConditions[] = "d.source_type IN ('quick_direct','repo_forward')";
     $pendingConditions[] = "uploader.role = ?";
     $pendingParams[] = $filterUploader;
 }

@@ -2,8 +2,6 @@
 define('CHED_APP', true);
 require_once 'config.php';
 
-// Logout requires POST + CSRF (CSRF audit spec #9).
-// GET renders a minimal auto-submitting form so existing <a href="logout.php"> links keep working.
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     ?><!DOCTYPE html>
 <html lang="en">
@@ -34,9 +32,6 @@ if (!verifyCsrfToken($_POST['csrf_token'] ?? '')) {
 }
 
 if (session_status() === PHP_SESSION_ACTIVE) {
-    // Release the single-active-session claim before destroying the session.
-    // Scoped by token so a session that was already displaced cannot orphan the
-    // token of the browser that took over the account.
     if (!empty($_SESSION['user_id']) && !empty($_SESSION['session_token'])) {
         try {
             $pdo->prepare('UPDATE users SET active_session_token = NULL, active_session_last_seen = NULL WHERE id = ? AND active_session_token = ?')
