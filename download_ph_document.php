@@ -1,5 +1,5 @@
 <?php
-define('CHED_APP', true);
+if (!defined('CHED_APP')) define('CHED_APP', true);
 require_once 'config.php';
 requireAdmin();
 
@@ -25,9 +25,18 @@ if (!$document) {
     exit;
 }
 
-$filePath = securePath($document['file_path']);
+$filePath = (string) $document['file_path'];
 
-if (!$filePath || !file_exists($filePath)) {
+// Storage outage must not read as "file not found" (plan §9).
+try {
+    $fileAvailable = storageObjectExists($filePath);
+} catch (StorageException $e) {
+    error_log('[CHED] download_ph_document blocked, storage unavailable: ' . get_class($e));
+    header('Location: admin_manage_document.php?error=Storage temporarily unavailable. Please try again.');
+    exit;
+}
+
+if (!$fileAvailable) {
     header('Location: admin_manage_document.php?error=File not found on server.');
     exit;
 }
@@ -35,14 +44,6 @@ if (!$filePath || !file_exists($filePath)) {
 // Log the download
 logAudit($pdo, 'download_document', 'Downloaded PH document: ' . $document['title'], 'ph_document', $docId);
 
-// Set headers for download
-header('Content-Type: application/octet-stream');
-header('Content-Disposition: attachment; filename="' . basename($document['file_path']) . '"');
-header('Content-Length: ' . filesize($filePath));
-header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
-header('Pragma: no-cache');
-header('Expires: 0');
-
-readfile($filePath);
+storageStreamDownload($filePath, basename($filePath));
 exit;
 ?>

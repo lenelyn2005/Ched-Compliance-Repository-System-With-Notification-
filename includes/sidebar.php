@@ -51,11 +51,15 @@ $role = $_SESSION['role'] ?? '';
 $userName = $_SESSION['user_name'] ?? 'User';
 $userId = $_SESSION['user_id'] ?? null;
 
-$unreadCount = 0;
-if ($userId) {
-    try {
-        $unreadCount = getUnreadNotificationCount($pdo, $userId);
-    } catch (Exception $e) {
+// header.php already computed $unreadCount earlier in this request; only
+// fall back to the COUNT query when a page includes the sidebar standalone.
+if (!isset($unreadCount)) {
+    $unreadCount = 0;
+    if ($userId) {
+        try {
+            $unreadCount = getUnreadNotificationCount($pdo, (int) $userId);
+        } catch (Exception $e) {
+        }
     }
 }
 
@@ -104,6 +108,17 @@ if ($role === 'admin') {
             ],
         ],
     ];
+} elseif ($role === 'super_admin') {
+    $sidebarSections = [
+        [
+            'label' => 'Overview',
+            'links' => [
+                ['href' => 'super_admin_dashboard.php', 'label' => 'Administrator Accounts', 'icon' => 'users', 'color' => 'primary'],
+                ['href' => 'admin_audit_trail.php', 'label' => 'Audit Trail', 'icon' => 'clock', 'color' => 'muted'],
+                ['href' => 'admin_settings.php', 'label' => 'System Settings', 'icon' => 'settings', 'color' => 'muted'],
+            ],
+        ],
+    ];
 } elseif (in_array($role, ['department', 'unit_head'], true)) {
     $deptId = $_SESSION['department_id'] ?? 0;
     $phId = $_SESSION['user_id'] ?? 0;
@@ -136,8 +151,7 @@ if ($role === 'admin') {
             if (empty($filePath)) {
                 return false;
             }
-            $fullPath = securePath($filePath);
-            return $fullPath && file_exists($fullPath) && is_file($fullPath);
+            return storageFilePresent($filePath);
         }));
     } catch (Exception $e) {
         $deptCount = 0;
@@ -166,8 +180,7 @@ if ($role === 'admin') {
             if (empty($filePath)) {
                 return false;
             }
-            $fullPath = securePath($filePath);
-            return $fullPath && file_exists($fullPath) && is_file($fullPath);
+            return storageFilePresent($filePath);
         }));
     } catch (Exception $e) {
         $phCount = 0;
@@ -260,6 +273,7 @@ if ($role === 'admin') {
 // ---------------------------------------------------------------
 $roleLabels = [
     'admin'      => 'Administrator',
+    'super_admin' => 'Super Admin',
     'department' => 'Program Head',
     'teacher'    => 'Faculty',
     'staff'      => 'Staff',

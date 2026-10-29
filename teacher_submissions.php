@@ -7,6 +7,31 @@ $success = $_GET['msg'] ?? '';
 
 $teacherId = (int)$_SESSION['user_id'];
 
+// AJAX: Live submissions count refresh (30s poll + WS-triggered).
+// Cheap COUNTs placed BEFORE the full page fetches: this branch used to run
+// after two unbounded SELECT * queries per poll tick.
+if (isAjaxRequest() && ($_POST['action'] ?? '') === 'refresh_submissions') {
+    $c1 = $pdo->prepare("
+        SELECT COUNT(*) FROM documents d
+        JOIN teacher_requirements tr ON d.teacher_requirement_id = tr.id
+        WHERE tr.teacher_id = ? AND d.file_path IS NOT NULL AND d.file_path != ''
+    ");
+    $c1->execute([$teacherId]);
+    $deptCount = (int) $c1->fetchColumn();
+    $c2 = $pdo->prepare("
+        SELECT COUNT(*) FROM ph_documents pd
+        JOIN teacher_ph_requirements tpr ON pd.teacher_ph_requirement_id = tpr.id
+        WHERE tpr.teacher_id = ? AND pd.file_path IS NOT NULL AND pd.file_path != ''
+    ");
+    $c2->execute([$teacherId]);
+    $phCount = (int) $c2->fetchColumn();
+    sendJson([
+        'dept_submissions' => $deptCount,
+        'ph_submissions' => $phCount,
+        'total_submissions' => $deptCount + $phCount,
+    ]);
+}
+
 // All versions of documents submitted by this teacher (department requirements)
 $submissions = $pdo->prepare("
     SELECT d.*,
@@ -32,8 +57,7 @@ $deptSubmissions = array_values(array_filter($deptSubmissions, function ($doc) {
     if (empty($filePath)) {
         return false;
     }
-    $fullPath = securePath($filePath);
-    return $fullPath !== false && file_exists($fullPath) && is_file($fullPath);
+    return storageFilePresent($filePath);
 }));
 
 // Also fetch PH requirement submissions
@@ -72,24 +96,11 @@ $phSubmissions = array_values(array_filter($phSubmissions, function ($doc) {
     if (empty($filePath)) {
         return false;
     }
-    $fullPath = securePath($filePath);
-    return $fullPath !== false && file_exists($fullPath) && is_file($fullPath);
+    return storageFilePresent($filePath);
 }));
 
 // Merge both types of submissions
 $submissions = array_merge($deptSubmissions, $phSubmissions);
-
-// AJAX: Live submissions count refresh (30s poll + WS-triggered)
-if (isAjaxRequest() && ($_POST['action'] ?? '') === 'refresh_submissions') {
-    $deptCount = count($deptSubmissions);
-    $phCount = count($phSubmissions);
-    $totalCount = $deptCount + $phCount;
-    sendJson([
-        'dept_submissions' => $deptCount,
-        'ph_submissions' => $phCount,
-        'total_submissions' => $totalCount,
-    ]);
-}
 
 // Reviewer of this teacher's department — Program Head or Unit Head.
 $deptStmt = $pdo->prepare("SELECT department_id FROM users WHERE id = ?");

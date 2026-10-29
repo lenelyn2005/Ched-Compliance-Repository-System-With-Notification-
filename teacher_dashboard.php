@@ -2094,7 +2094,7 @@ include 'includes/header.php'; ?>
                 </div>
                 <div class="form-group">
                     <label>File <span style="color:var(--danger)">*</span></label>
-                    <input type="file" name="document_file" class="form-control" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.gif,.webp,.xls,.xlsx" required>
+                    <input type="file" name="document_file" class="form-control" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.gif,.webp,.xls,.xlsx,.ppt,.pptx" required>
                 </div>
                 <div class="form-group">
                     <label>Comment</label>

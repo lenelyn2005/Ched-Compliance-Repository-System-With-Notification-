@@ -35,3 +35,13 @@ exports/*
 !exports/.htaccess
 preview_cache/
 tmp/
+
+# Restrict opencode and important package files
+.opencode/
+.opencode
+opencode.json
+package-lock.json
+package.json
+
+# R2 migration ledger (operational record, contains no secrets)
+/scripts/storage/

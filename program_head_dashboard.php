@@ -103,8 +103,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     $teacherReqId = (int)($originalDoc['teacher_requirement_id'] ?? 0);
 
     // Handle file upload (self mode only - assign mode needs no file)
-    $uploadDir = UPLOAD_PATH . 'ph_direct' . DIRECTORY_SEPARATOR;
-    $file = null; $ext = null; $filePath = null; $fullPath = null;
+    $file = null; $ext = null; $filePath = null;
     if ($resubmitMode === 'self') {
     $file = $_FILES['resubmit_file'];
 
@@ -130,7 +129,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     $ext = $stored['ext'];
     $newFilename = $stored['filename'];
     $filePath = 'ph_direct/' . $newFilename;
-    $fullPath = $uploadDir . $newFilename;
     }
 
     try {
@@ -181,7 +179,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             }
         }
         else {
-            // Unknown/unrecognized source — block for safety but allow if it matches basic criteria
             if ($resubmitMode === 'assign') {
                 throw new Exception('Resubmission mode "assign" is not allowed for this document source.');
             }
@@ -313,9 +310,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
 
     } catch (Exception $e) {
         $pdo->rollBack();
-        // Clean up uploaded file if database operation failed
-        if (isset($fullPath) && file_exists($fullPath)) {
-            unlink($fullPath);
+        // Clean up the stored object if the database operation failed
+        if (!empty($filePath)) {
+            storageDeleteRel($filePath);
         }
         $_SESSION['error'] = 'Failed to resubmit document: ' . $e->getMessage();
         header('Location: program_head_dashboard.php');
@@ -559,8 +556,7 @@ $rejectedAll = array_values(array_filter($rejectedAll, function ($doc) {
     if (empty($filePath)) {
         return false;
     }
-    $fullPath = securePath($filePath);
-    return $fullPath !== false && file_exists($fullPath) && is_file($fullPath);
+    return storageFilePresent($filePath);
 }));
 
 // Identify source for each rejected item — source-aware using DB fields
@@ -2402,13 +2398,13 @@ include 'includes/header.php';
         <div class="card">
             <div class="card-header">
                 <h3><?= render_dashboard_icon('teacher') ?> Progress Overview</h3>
-                <a href="program_head_teachers.php" class="btn btn-sm btn-outline">View All Faculty</a>
+                <a href="program_head_teachers.php" class="btn btn-sm btn-outline">View All</a>
             </div>
             <div class="card-content no-padding">
                 <?php if (empty($teachers)): ?>
                     <div class="empty-state">
                         <div class="empty-state-icon"><?= render_dashboard_icon('users') ?></div>
-                        <p>No faculty found in your department.</p>
+                        <p>No Members found in your department.</p>
                         <small>Once faculty accounts are added, their submission progress will appear here.</small>
                     </div>
                 <?php else: ?>
@@ -2683,7 +2679,7 @@ include 'includes/header.php';
                     <div class="form-group">
                         <label>File <span class="text-danger">*</span></label>
                         <input type="file" name="resubmit_file" class="form-control"
-                               accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.gif,.webp,.xls,.xlsx" required>
+                               accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.gif,.webp,.xls,.xlsx,.ppt,.pptx" required>
                     </div>
                     <div class="form-group">
                         <label>Comment</label>

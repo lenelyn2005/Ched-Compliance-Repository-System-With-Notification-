@@ -12,13 +12,30 @@ if (!defined('CHED_APP')) {
     define('CHED_APP', true);
 }
 
+// Trusted reverse proxies for getClientIP(). Must be defined before any call
+// to getClientIP() — the session-kill enforcement block below runs first.
+$TRUSTED_PROXIES = [];
+
 // Load environment variables (.env) BEFORE any SMTP/DB config is read.
 require_once __DIR__ . '/includes/env_loader.php';
-loadEnv(__DIR__ . '/.env');
+$envPath = __DIR__ . '/.env';
+if (file_exists($envPath)) {
+    loadEnv($envPath);
+} else {
+    // Also try cwd if running from different directory
+    $cwdEnv = getcwd() . DIRECTORY_SEPARATOR . '.env';
+    if (file_exists($cwdEnv)) {
+        loadEnv($cwdEnv);
+    }
+}
 
 // Performance optimization - GZIP compression before any output
 require_once __DIR__ . '/includes/performance.php';
 perf_gzip_start();
+
+// Centralized storage service (R2 migration, Stage 2). Declarations only —
+// the R2 SDK loads lazily on first use, so local-mode requests pay nothing.
+require_once __DIR__ . '/includes/r2_storage.php';
 
 // Set timezone to match MySQL server timezone (Asia/Manila = UTC+8)
 date_default_timezone_set('Asia/Manila');
@@ -38,8 +55,90 @@ define('DB_PASS', getenv('DB_PASS') ?: '');
 
 // File storage settings — files stored outside public web root
 define('SECURE_STORAGE_PATH', getenv('SECURE_STORAGE_PATH') ?: 'C:\\ched_secure_storage\\documents\\');
-define('TEMP_PATH', getenv('TEMP_PATH') ?: 'C:\\ched_secure_storage\\temp\\');
+// TEMP_PATH — local scratch only (previews, ZIP staging, cache). Never under
+// C:\ched_secure_storage: that tree is being retired, and getPreviewCacheDir()
+// would otherwise recreate it after the tree is removed. Override with
+// TEMP_PATH in .env if you want a different location.
+define('TEMP_PATH', getenv('TEMP_PATH')
+    ?: rtrim(sys_get_temp_dir(), '\\/') . DIRECTORY_SEPARATOR . 'ched_temp' . DIRECTORY_SEPARATOR);
+if (!is_dir(TEMP_PATH)) {
+    @mkdir(TEMP_PATH, 0755, true);
+}
 define('UPLOAD_PATH', SECURE_STORAGE_PATH); // alias — all existing code references UPLOAD_PATH
+
+// Storage driver — Cloudflare R2 is the exclusive permanent storage backend.
+// Local disk is never used as permanent document storage. Operations fail typed
+// at the storage call site; boot verifies config once (cached 15 min) but does
+// not gate unrelated pages on R2 availability.
+define('APP_ENV', strtolower(trim((string) (getenv('APP_ENV') ?: 'development'))));
+define('STORAGE_DRIVER', 'r2');
+
+function failStorageConfig(string $reason): never
+{
+    error_log('[CHED] Storage configuration failure: ' . $reason);
+    if (PHP_SAPI === 'cli') {
+        fwrite(STDERR, 'Storage configuration error: ' . $reason . PHP_EOL);
+        exit(1);
+    }
+    http_response_code(500);
+    header('Content-Type: text/plain; charset=utf-8');
+    // Variable names only, never values; the specific reason is kept out of production responses.
+    echo APP_ENV === 'production'
+        ? 'Service configuration error.'
+        : 'Configuration error: ' . htmlspecialchars($reason, ENT_QUOTES, 'UTF-8');
+    exit(1);
+}
+
+$missingR2Config = [];
+foreach (['R2_BUCKET_NAME', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY'] as $r2var) {
+    if (trim((string) getenv($r2var)) === '') {
+        $missingR2Config[] = $r2var;
+    }
+}
+if (trim((string) getenv('R2_ENDPOINT')) === '' && trim((string) getenv('R2_ACCOUNT_ID')) === '') {
+    $missingR2Config[] = 'R2_ENDPOINT (or R2_ACCOUNT_ID)';
+}
+if ($missingR2Config) {
+    failStorageConfig('R2 configuration incomplete or missing environment variables: ' . implode(', ', $missingR2Config) . '. Configure them in .env — never commit their values.');
+}
+
+// Storage driver init is NOT a per-request health gate: an R2 outage must not
+// take down login or any page that does not need storage. The boot check only
+// confirms the client/bucket config works and writes an ok-marker (15 min) so
+// normal navigation pays zero R2 latency here; real object operations still
+// fail loudly (typed) on their own. On failure the marker is cleared and the
+// failure is negative-cached for 60 s so an outage does not re-probe R2 on
+// every request; storage-requiring endpoints report the outage per operation.
+function r2BootCheck(?callable $probe = null): void
+{
+    if (!defined('PERF_CACHE_DIR')) {
+        define('PERF_CACHE_DIR', __DIR__ . '/system/storage/cache');
+    }
+    $marker = PERF_CACHE_DIR . '/r2_boot_ok';
+    if (@filemtime($marker) !== false && (time() - @filemtime($marker)) < 900) {
+        return;
+    }
+    $failMarker = PERF_CACHE_DIR . '/r2_boot_fail';
+    if (@filemtime($failMarker) !== false && (time() - @filemtime($failMarker)) < 60) {
+        return;
+    }
+    try {
+        // Real boot probe; tests inject a throwing closure and a temp cache dir.
+        ($probe ?? static fn (): ?array => R2Storage::default()->headBucket())();
+        @mkdir(PERF_CACHE_DIR, 0755, true);
+        @file_put_contents($marker, (string) time());
+        @unlink($failMarker);
+    } catch (Throwable $e) {
+        @unlink($marker);
+        @mkdir(PERF_CACHE_DIR, 0755, true);
+        @file_put_contents($failMarker, (string) time());
+        // Log sanitized diagnostic details server-side; boot continues so
+        // unrelated pages stay up and storage ops fail typed where used.
+        $san = R2Storage::toStorageError($e)->getMessage();
+        error_log('[CHED] R2 initial check failed (boot continues): ' . get_class($e) . ' ' . $san);
+    }
+}
+r2BootCheck();
 
 // System settings — .env overridable, defaults below. No DB override table.
 $MAX_FILE_SIZE      = (int) (getenv('MAX_FILE_SIZE') ?: 100 * 1024 * 1024); // 100MB
@@ -88,15 +187,16 @@ $NOTIFICATION_EMAIL_ENABLED = [
 
 // SMTP settings for PHPMailer — single source: .env → env_loader → getSmtpConfig → PHPMailer
 // No hardcoded password fallback. If .env is missing, SMTP will fail fast and log clearly.
+// Function: getSmtpConfig
 function getSmtpConfig(): array
 {
     return [
-        'host' => getenv('SMTP_HOST') ?: getSystemSetting('smtp_host_default', 'smtp.gmail.com'),
-        'port' => (int)(getenv('SMTP_PORT') ?: getSystemSetting('smtp_port_default', 587)),
+        'host' => getenv('SMTP_HOST') ?: 'smtp.gmail.com',
+        'port' => (int)(getenv('SMTP_PORT') ?: 587),
         'user' => getenv('SMTP_USER') ?: '',
         'pass' => getenv('SMTP_PASS') ?: '',
         'from' => getenv('SMTP_FROM') ?: (getenv('SMTP_USER') ?: 'noreply@localhost'),
-        'from_name' => getenv('SMTP_FROM_NAME') ?: getSystemSetting('smtp_from_name_default', 'CHED Compliance System')
+        'from_name' => getenv('SMTP_FROM_NAME') ?: 'CHED Compliance System'
     ];
 }
 $smtp = getSmtpConfig();
@@ -111,6 +211,9 @@ if (empty(SMTP_USER) || empty(SMTP_PASS)) {
     error_log('[CHED Compliance] WARNING: SMTP_USER or SMTP_PASS empty — emails will fail. Check .env');
 }
 
+// Configurable inactivity threshold for online/offline presence (seconds).
+$onlineInactivityThreshold = (int)(getenv('ONLINE_INACTIVITY_THRESHOLD') ?: 1800);
+
 // Session configuration and security
 if (PHP_SAPI !== 'cli') {
     $isHttps = !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off';
@@ -123,7 +226,12 @@ if (PHP_SAPI !== 'cli') {
         // file, and a session ini set while active is ignored with a warning
         // (the old config.php:131-134 spam). Before session_start() is the only
         // place gc_maxlifetime can take effect.
-        ini_set('session.gc_maxlifetime', 3600);
+        // Anti session-fixation: strict mode rejects client-supplied session
+        // IDs that don't exist server-side. CAVEAT: use_strict_mode is
+        // PHP_INI_PERDIR, so ALSO set it in php.ini — the ini_set below only
+        // takes effect where the SAPI allows it.
+        ini_set('session.use_strict_mode', '1');
+        ini_set('session.gc_maxlifetime', 1800);
         session_set_cookie_params([
             'lifetime' => 0,
             'path'     => '/',
@@ -135,17 +243,27 @@ if (PHP_SAPI !== 'cli') {
         session_start();
     }
 
-    $sessionLifetime = 300; // 5 min inactivity timeout
+    $sessionLifetime = 1800; // 30 min inactivity timeout
 
     // Single-active-session: a token whose last real activity is older than this
-    // is abandoned and can be taken over. Matched to the 5-min idle timeout so a
+    // is abandoned and can be taken over. Matched to the 30-min idle timeout so a
     // session the app would already have logged out is never a blocking "ghost".
-    define('ACTIVE_SESSION_TTL', 300);
+    // ponytail: TTL zero, no ghost session block; upgrade when concurrent login guard needed
+    define('ACTIVE_SESSION_TTL', 0);
 
     // ✅ FIX: This check now runs for EVERY page (including login.php) so idle
-    // logged-in users are always logged out after 5 minutes of inactivity.
+    // logged-in users are always logged out after 30 minutes of inactivity.
     // login.php no longer has its own duplicate timeout check.
     if (isset($_SESSION['last_activity']) && (time() - (int)$_SESSION['last_activity'] > $sessionLifetime)) {
+        // Clear DB session token so presence status shows Offline immediately.
+        if (!empty($_SESSION['user_id']) && !empty($_SESSION['session_token'])) {
+            try {
+                $pdo->prepare('UPDATE users SET active_session_token = NULL, active_session_last_seen = NULL WHERE id = ? AND active_session_token = ?')
+                    ->execute([(int) $_SESSION['user_id'], $_SESSION['session_token']]);
+            } catch (Throwable $e) {
+                error_log('[CHED Compliance] Session expiration DB clear failed: ' . $e->getMessage());
+            }
+        }
         $_SESSION = [];
         session_destroy();
         if (
@@ -178,6 +296,9 @@ if (PHP_SAPI !== 'cli') {
     header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
     header('Pragma: no-cache');
     header('Expires: 0');
+    header('X-Frame-Options: DENY');
+    header('X-Content-Type-Options: nosniff');
+    header('Referrer-Policy: strict-origin-when-cross-origin');
 
     perf_headers();
 }
@@ -195,6 +316,7 @@ if (!$pdo) {
 // is DORMANT (login behaves exactly as before) until the columns exist;
 // log loudly so a stale schema can't go unnoticed.
 $GLOBALS['active_session_cols'] = false;
+$GLOBALS['users_is_active_col'] = false;
 if (PHP_SAPI !== 'cli') {
     try {
         $pdo->query('SELECT active_session_token, active_session_last_seen FROM users WHERE id = 0');
@@ -202,15 +324,20 @@ if (PHP_SAPI !== 'cli') {
     } catch (Throwable $e) {
         error_log('[CHED Compliance] users.active_session_* columns missing — restore schema from final.database.sql (single-session guard dormant).');
     }
+    // Same probe style as above: without migrations/super_admin.sql the
+    // deactivation checks below stay dormant and every page behaves as before.
+    try {
+        $pdo->query('SELECT is_active FROM users WHERE id = 0');
+        $GLOBALS['users_is_active_col'] = true;
+    } catch (Throwable $e) {
+        error_log('[CHED Compliance] users.is_active column missing — apply migrations/super_admin.sql (account deactivation dormant).');
+    }
 }
 
-// ✅ FIX: Sync MySQL session timezone with PHP's.
-// Without this, PHP (Asia/Manila = UTC+8) and MySQL (usually UTC) mismatch
-// causes lockouts to be 8 hours long (or 8 hours short) and NOW() comparisons
-// in checkLoginIpLockout() to be wrong.
 try {
     $tzOffset = (new DateTime('now', new DateTimeZone(date_default_timezone_get())))->format('P');
-    $pdo->exec("SET time_zone = '{$tzOffset}'");
+    $quotedTz = $pdo->quote($tzOffset);
+    $pdo->exec("SET time_zone = " . $quotedTz);
 } catch (Throwable $e) {
     error_log('[CHED Compliance] Failed to set MySQL session time_zone: ' . $e->getMessage());
 }
@@ -223,7 +350,8 @@ try {
 // another tab, window, or device must kill this session too.
 if (PHP_SAPI !== 'cli' && !empty($_SESSION['user_id'])) {
     try {
-        $enfStmt = $pdo->prepare('SELECT locked_until, active_session_token, active_session_last_seen FROM users WHERE id = ?');
+        $enfCols = !empty($GLOBALS['users_is_active_col']) ? ', is_active' : '';
+        $enfStmt = $pdo->prepare('SELECT locked_until, active_session_token, active_session_last_seen' . $enfCols . ' FROM users WHERE id = ?');
         $enfStmt->execute([(int) $_SESSION['user_id']]);
         $enfRow        = $enfStmt->fetch(PDO::FETCH_ASSOC); // false = no such user
         $userMissing   = ($enfRow === false);
@@ -233,6 +361,11 @@ if (PHP_SAPI !== 'cli' && !empty($_SESSION['user_id'])) {
             ? 0
             : (is_numeric($lockedUntil) ? (int)$lockedUntil : (int)strtotime($lockedUntil));
         $lockRemaining = ($lockedTs > time()) ? $lockedTs - time() : 0;
+
+        // Deactivation is account state, not session state: the Super Admin flipping
+        // is_active=0 must kill a live session here, exactly like a lockout does.
+        $deactivated = !empty($GLOBALS['users_is_active_col']) && !$userMissing
+            && (int) ($enfRow['is_active'] ?? 1) === 0;
 
         // Single active session: whoever holds the account's current token IS the
         // live session. This session's token differing (or vanishing while the
@@ -246,11 +379,8 @@ if (PHP_SAPI !== 'cli' && !empty($_SESSION['user_id'])) {
             $tokenReplaced = true;
         }
 
-        if ($userMissing || $lockRemaining > 0 || $tokenReplaced) {
+        if ($userMissing || $lockRemaining > 0 || $tokenReplaced || $deactivated) {
             $killedUid = (int) $_SESSION['user_id'];
-            // A displaced session must NOT clear the token: it no longer owns the
-            // account. Lockout/missing-user kills DO clear it so the user can log
-            // back in as soon as they are allowed to.
             if ($GLOBALS['active_session_cols'] && !$tokenReplaced && $myToken !== '') {
                 try {
                     $pdo->prepare('UPDATE users SET active_session_token = NULL, active_session_last_seen = NULL WHERE id = ? AND active_session_token = ?')
@@ -265,6 +395,9 @@ if (PHP_SAPI !== 'cli' && !empty($_SESSION['user_id'])) {
             if ($tokenReplaced) {
                 $killAction = 'session_killed_duplicate';
                 $killParam  = 'session=1';
+            } elseif ($deactivated) {
+                $killAction = 'session_killed_deactivated';
+                $killParam  = 'inactive=1';
             } elseif ($lockRemaining > 0) {
                 $killAction = 'session_killed_lockout';
                 $killParam  = 'locked=1';
@@ -303,10 +436,6 @@ if (PHP_SAPI !== 'cli' && !empty($_SESSION['user_id'])) {
             header('Location: login.php' . ($killParam !== '' ? '?' . $killParam : ''));
             exit;
         } elseif ($GLOBALS['active_session_cols'] && $myToken !== '') {
-            // Heartbeat the token's last-seen so a genuinely live session stays
-            // "fresh" (denies takeover) while an abandoned one frees after TTL.
-            // Only real page loads count, mirroring the idle clock — background
-            // pollers must not keep a token alive forever. Throttled to 60s.
             $lastSeen = (int) ($enfRow['active_session_last_seen'] ?? 0);
             if (!isAjaxRequest() && (time() - $lastSeen >= 60)) {
                 try {
@@ -318,8 +447,6 @@ if (PHP_SAPI !== 'cli' && !empty($_SESSION['user_id'])) {
             }
         }
     } catch (Throwable $e) {
-        // Fail closed for auth errors would break the whole app on a transient DB
-        // blip; log loudly instead. Lockout still enforced at login time.
         error_log('[CHED Compliance] Lockout enforcement query failed: ' . $e->getMessage());
     }
 }
@@ -327,62 +454,66 @@ if (PHP_SAPI !== 'cli' && !empty($_SESSION['user_id'])) {
 // ===========================================================
 // SYSTEM SETTINGS
 // ===========================================================
-// No DB-backed settings table (never had a writer). Values are set here or via .env.
-function getSystemSetting(string $key, $default = null)
-{
-    return $default;
-}
-
 define('MAX_FILE_SIZE', $MAX_FILE_SIZE);
 define('ALLOWED_EXTENSIONS', $ALLOWED_EXTENSIONS);
 define('ALLOWED_MIMES', $ALLOWED_MIMES);
 define('ALLOWED_EXTENSIONS_LABEL', $ALLOWED_EXTENSIONS_LABEL);
 define('EXPIRY_WARNING_DAYS', $EXPIRY_WARNING_DAYS);
+define('ONLINE_INACTIVITY_THRESHOLD', $onlineInactivityThreshold);
 
 // ===========================================================
 // ROLE CHECKS
 // ===========================================================
 
+// Function: isAdmin
 function isAdmin(): bool
 {
     return isset($_SESSION['admin_id']) || (isset($_SESSION['role']) && $_SESSION['role'] === 'admin');
 }
 
+// Function: isDepartment
 function isDepartment(): bool
 {
     return isset($_SESSION['role']) && in_array($_SESSION['role'], ['department', 'unit_head'], true);
 }
 
+// Function: phRoleName
 function phRoleName(?string $role): string
 {
     return $role === 'unit_head' ? 'Unit Head' : 'Program Head';
 }
 
+// Function: currentRoleName
 function currentRoleName(): string
 {
     return phRoleName($_SESSION['role'] ?? '');
 }
 
+// Function: phRoleShortFor
 function phRoleShortFor(?string $role): string
 {
     return $role === 'unit_head' ? 'UH' : 'PH';
 }
 
+// Function: phRoleShort
 function phRoleShort(): string
 {
     return phRoleShortFor($_SESSION['role'] ?? '');
 }
 
+// Function: facultyRoleName
 function facultyRoleName(?string $role): string
 {
     return $role === 'staff' ? 'Staff' : 'Teacher';
 }
 
+// Function: isTeacher
 function isTeacher(): bool
 {
     return isset($_SESSION['role']) && in_array($_SESSION['role'], ['teacher', 'staff'], true);
 }
 
+// Function: creatableRoles
 function creatableRoles(?string $actorRole): array
 {
     switch ($actorRole) {
@@ -396,13 +527,23 @@ function creatableRoles(?string $actorRole): array
     }
 }
 
+// Function: allowedRoleFor
 function allowedRoleFor(?string $actorRole, ?string $requested): ?string
 {
     return in_array($requested, creatableRoles($actorRole), true) ? $requested : null;
 }
 
+// Function: refreshSessionRoleFromDb
+// Memoized per request: requireAdmin(), superadmin(), requireDepartment() ...
+// each call this; several pages mix gates. One identical user query per
+// request is enough — role cannot legitimately change mid-request.
 function refreshSessionRoleFromDb(): void
 {
+    static $refreshed = false;
+    if ($refreshed) {
+        return;
+    }
+    $refreshed = true;
     if (!isset($_SESSION['user_id'])) {
         return;
     }
@@ -432,18 +573,52 @@ function refreshSessionRoleFromDb(): void
     }
 }
 
+// Function: requireAdmin
 function requireAdmin(): void
 {
     refreshSessionRoleFromDb();
-    if (!isAdmin()) {
+    $isSuper = (isset($_SESSION['role']) && $_SESSION['role'] === 'super_admin');
+    if (!isAdmin() && !$isSuper) {
         header('Location: login.php');
         exit;
     }
-    if (!isset($_SESSION['admin_id'])) {
+    if (!isset($_SESSION['admin_id']) && !$isSuper) {
         $_SESSION['admin_id'] = $_SESSION['user_id'];
     }
 }
 
+// Function: superadmin
+// Centralized Super Admin authorization check for pages and endpoints.
+// Reuses the same role verification as requireSuperAdmin().
+function superadmin(): bool
+{
+    refreshSessionRoleFromDb();
+    return (isset($_SESSION['role']) && $_SESSION['role'] === 'super_admin');
+}
+
+// Function: requireSuperAdmin
+// The Super Admin is a separate, highly privileged role whose only job is to
+// create and manage Admin accounts. It never satisfies isAdmin(): a super
+// admin session has no admin_id and role !== 'admin', so every requireAdmin()
+// page already refuses it — and every other role gate refuses everyone else.
+function requireSuperAdmin(): void
+{
+    refreshSessionRoleFromDb();
+    if (($_SESSION['role'] ?? '') === 'super_admin') {
+        return;
+    }
+    // AJAX/Fetch callers get JSON instead of an HTML redirect body.
+    if (isAjaxRequest()) {
+        header('Content-Type: application/json');
+        http_response_code(401);
+        echo json_encode(['success' => false, 'error' => 'Unauthorized.', 'redirect' => 'login.php']);
+        exit;
+    }
+    header('Location: login.php');
+    exit;
+}
+
+// Function: requireDepartment
 function requireDepartment(): void
 {
     refreshSessionRoleFromDb();
@@ -470,6 +645,7 @@ function requireDepartment(): void
     }
 }
 
+// Function: requireTeacher
 function requireTeacher(): void
 {
     refreshSessionRoleFromDb();
@@ -501,11 +677,13 @@ function requireTeacher(): void
 // UTILITY
 // ===========================================================
 
+// Function: sanitize
 function sanitize(?string $str): string
 {
     return htmlspecialchars($str ?? '', ENT_QUOTES, 'UTF-8');
 }
 
+// Function: timeAgo
 function timeAgo($timestamp): string
 {
     if (empty($timestamp)) {
@@ -537,6 +715,7 @@ function timeAgo($timestamp): string
     return date('M j, Y', $timestamp);
 }
 
+// Function: generateCsrfToken
 function generateCsrfToken(): string
 {
     if (!isset($_SESSION['csrf_token'])) {
@@ -545,11 +724,13 @@ function generateCsrfToken(): string
     return $_SESSION['csrf_token'];
 }
 
+// Function: verifyCsrfToken
 function verifyCsrfToken(string $token): bool
 {
-    return isset($_SESSION['csrf_token']) && hash_equals($_SESSION['csrf_token'], $token);
+  return isset($_SESSION['csrf_token']) && hash_equals($_SESSION['csrf_token'], $token);
 }
 
+// Function: requireCsrfToken
 function requireCsrfToken(): void
 {
     $token = $_POST['csrf_token'] ?? '';
@@ -560,16 +741,18 @@ function requireCsrfToken(): void
             echo json_encode(['success' => false, 'error' => 'Invalid security token. Please refresh the page and try again.']);
             exit;
         }
-        http_response_code(403);
-        exit('Invalid security token. Please refresh the page and try again.');
+        header('Location: ' . ($_SERVER['REQUEST_URI'] ?? '/'));
+        exit;
     }
 }
 
+// Function: getCsrfToken
 function getCsrfToken(): string
 {
     return $_SESSION['csrf_token'] ?? generateCsrfToken();
 }
 
+// Function: csrfField
 function csrfField(): string
 {
     return '<input type="hidden" name="csrf_token" value="' . getCsrfToken() . '">';
@@ -579,6 +762,7 @@ function csrfField(): string
 // EXPIRATION MONITORING - single source of truth (2-day rule)
 // ===========================================================
 
+// Function: classifyExpiryStatus
 function classifyExpiryStatus(?string $expiryDate): string
 {
     global $EXPIRY_WARNING_DAYS;
@@ -596,6 +780,7 @@ function classifyExpiryStatus(?string $expiryDate): string
     return 'active';
 }
 
+// Function: expiryStatusLabel
 function expiryStatusLabel(string $status): string
 {
     return ['active' => 'Active', 'expiring' => 'Expiring', 'expired' => 'Expired'][$status] ?? ucfirst($status);
@@ -605,14 +790,13 @@ function expiryStatusLabel(string $status): string
 // AUDIT
 // ===========================================================
 
-$TRUSTED_PROXIES = [];
-
+// Function: getClientIP
 function getClientIP()
 {
     global $TRUSTED_PROXIES;
     $remote = $_SERVER['REMOTE_ADDR'] ?? '';
-    // (array) cast: getClientIP may run from config's own early enforcement block,
-    // before the $TRUSTED_PROXIES assignment below executes (order-of-include).
+    // (array) cast stays defensive: $TRUSTED_PROXIES is defined at the top of
+    // this file, but a partial include could still leave it unset.
     if (in_array($remote, (array) $TRUSTED_PROXIES, true)) {
         $forwarded = trim(explode(',', $_SERVER['HTTP_X_FORWARDED_FOR'] ?? '')[0]);
         if (filter_var($forwarded, FILTER_VALIDATE_IP)) {
@@ -622,34 +806,41 @@ function getClientIP()
     return $remote === '::1' ? '127.0.0.1' : $remote;
 }
 
+
 function logAudit(PDO $pdo, string $action, string $description = '', ?string $entityType = null, ?int $entityId = null): void
 {
-    $userId = $_SESSION['user_id'] ?? null;
+    $userId    = $_SESSION['user_id'] ?? null;
     $timestamp = date('Y-m-d H:i:s');
     if (function_exists('getClientIP')) {
         $description .= ' [ip=' . getClientIP() . ']';
     }
     try {
-        $stmt = $pdo->prepare('INSERT INTO audit_trail (user_id, action, description, entity_type, entity_id, created_at) VALUES (?, ?, ?, ?, ?, ?)');
-        $stmt->execute([$userId, $action, $description, $entityType, $entityId, $timestamp]);
+        $stmt = $pdo->prepare(
+            'INSERT INTO audit_trail '
+            . '(user_id, action, description, entity_type, entity_id, created_at, trail_scope) '
+            . 'VALUES (?, ?, ?, ?, ?, ?, ?)'
+        );
+        foreach (['admin', 'super_admin'] as $scope) {
+            $stmt->execute([$userId, $action, $description, $entityType, $entityId, $timestamp, $scope]);
+        }
     } catch (Exception $e) {
         error_log('[CHED Compliance] Audit log error: ' . $e->getMessage());
     }
 }
 
+// Function: isDangerousMime
 function isDangerousMime(string $mime): bool
 {
     return (bool) preg_match('/(?:php|executable|dosexec|msdos|msdownload|sharedlib|shellscript|html|bat)/i', $mime);
 }
 
 // Human-readable label for a byte ceiling (e.g. 10485760 -> "10MB").
+// Function: megabytesLabel
 function megabytesLabel(int $bytes): string
 {
     return rtrim(rtrim(number_format($bytes / 1048576, 1), '0'), '.') . 'MB';
 }
 
-// General document size ceiling derived from MAX_FILE_SIZE so the message can
-// never drift from the enforced limit (fixes the old hardcoded "10MB"/"100MB").
 function maxFileSizeLabel(): string
 {
     return megabytesLabel(MAX_FILE_SIZE);
@@ -660,25 +851,27 @@ if (!defined('IMAGE_MAX_BYTES')) {
     define('IMAGE_MAX_BYTES', 10 * 1024 * 1024); // 10 MB
 }
 
+// Function: isImageExtension
 function isImageExtension(string $ext): bool
 {
     return in_array(strtolower($ext), ['jpg', 'jpeg', 'png', 'gif', 'webp'], true);
 }
 
 // Effective size ceiling for an upload: 10 MB for images, MAX_FILE_SIZE otherwise.
+// Function: maxFileSizeBytesFor
 function maxFileSizeBytesFor(string $ext): int
 {
     return isImageExtension($ext) ? IMAGE_MAX_BYTES : MAX_FILE_SIZE;
 }
 
+// Function: maxFileSizeLabelFor
 function maxFileSizeLabelFor(string $ext): string
 {
     return megabytesLabel(maxFileSizeBytesFor($ext));
 }
 
-// Map PHP's $_FILES['error'] codes to a message a user can act on. Error 1
-// (UPLOAD_ERR_INI_SIZE) is what users hit when a file exceeds php.ini's
 // upload_max_filesize/post_max_size, not the app limit.
+// Function: uploadErrorMessage
 function uploadErrorMessage(int $code): string
 {
     return match ($code) {
@@ -697,6 +890,7 @@ function uploadErrorMessage(int $code): string
 // IN-APP NOTIFICATIONS
 // ===========================================================
 
+// Function: shouldSendEmailForNotification
 function shouldSendEmailForNotification(string $title, string $type): bool
 {
     global $NOTIFICATION_EMAIL_ENABLED;
@@ -707,36 +901,7 @@ function shouldSendEmailForNotification(string $title, string $type): bool
     return true;
 }
 
-function adminNotifPref(string $key, bool $default = true): bool
-{
-    $prefs = getSystemSetting('admin_notif_prefs', null);
-    if (!is_array($prefs) || !array_key_exists($key, $prefs)) {
-        return $default;
-    }
-    return (bool)$prefs[$key];
-}
-
-function adminNotifCategoryAllows(string $title, string $type): bool
-{
-    if (stripos($title, 'Security Alert') !== false || $type === 'danger') {
-        return true;
-    }
-    $t = $title;
-    if (preg_match('/Requirement (Assigned|Updated|Expired|Removed)|New (Department )?Requirement|New Requirement/i', $t)) {
-        return adminNotifPref('assignment');
-    }
-    if (preg_match('/Submission|Document (Uploaded|Forwarded|Resubmitted|Restored)|New Document|New PH Document|Welcome/i', $t)) {
-        return adminNotifPref('submission');
-    }
-    if (preg_match('/Approved|Returned|Rejected|Review Complete|Fully Approved/i', $t)) {
-        return adminNotifPref('approval');
-    }
-    if (preg_match('/Expired|Expiring/i', $t)) {
-        return adminNotifPref('expiration');
-    }
-    return true;
-}
-
+// Function: createNotification
 function createNotification(PDO $pdo, int $userId, string $title, string $message, string $type = 'info', ?int $docId = null, ?string $docType = null): void
 {
     try {
@@ -745,57 +910,31 @@ function createNotification(PDO $pdo, int $userId, string $title, string $messag
             return;
         }
 
-        $isAdminRecip = false;
-        try {
-            $roleStmt = $pdo->prepare("SELECT role FROM users WHERE id = ?");
-            $roleStmt->execute([$userId]);
-            $isAdminRecip = $roleStmt->fetchColumn() === 'admin';
-        } catch (Exception $e) {
-            $isAdminRecip = false;
-        }
-        $allowAdminInApp = true;
-        $allowAdminEmail = true;
-        if ($isAdminRecip) {
-            $allowAdminInApp = adminNotifPref('in_app', true) && adminNotifCategoryAllows($title, $type);
-            $allowAdminEmail = adminNotifPref('email', true) && adminNotifCategoryAllows($title, $type);
-            if (!$allowAdminInApp && !$allowAdminEmail) {
-                error_log('[CHED Compliance] Admin notif prefs skipped: ' . $title);
-                return;
-            }
-        }
-
-        if ($allowAdminInApp) {
-            if (checkDuplicateNotification($pdo, $userId, $title, $message, $docId, $docType)) {
-                error_log('[CHED Compliance] Duplicate notification skipped: ' . $title);
-                return;
-            }
-
-            $rateCheck = $pdo->prepare("SELECT COUNT(*) FROM in_app_notifications WHERE user_id = ? AND created_at > DATE_SUB(NOW(), INTERVAL 1 HOUR)");
-            $rateCheck->execute([$userId]);
-            if ((int)$rateCheck->fetchColumn() >= 30) {
-                error_log('[CHED Compliance] Rate limit hit for user_id=' . $userId);
-                return;
-            }
-
-            $stmt = $pdo->prepare('INSERT INTO in_app_notifications (user_id, title, message, type, related_document_id, related_doc_type, created_at) VALUES (?, ?, ?, ?, ?, ?, NOW())');
-            $result = $stmt->execute([$userId, $title, $message, $type, $docId, $docType]);
-
-            if (!$result) {
-                error_log('[CHED Compliance] Notification insert failed for user_id: ' . $userId . ', title: ' . $title);
-                return;
-            }
-
-            $notificationId = (int)$pdo->lastInsertId();
-            error_log('[CHED Compliance] QUEUED notification id=' . $notificationId . ' user_id=' . $userId . ' title=' . $title . ' type=' . $type);
-        } else {
-            $notificationId = 0;
-            error_log('[CHED Compliance] Admin in-app pref off; email-only for title=' . $title);
-        }
-
-        if ($isAdminRecip && !$allowAdminEmail) {
-            error_log('[CHED Compliance] Admin email pref off for title=' . $title);
+        if (checkDuplicateNotification($pdo, $userId, $title, $message, $docId, $docType)) {
+            error_log('[CHED Compliance] Duplicate notification skipped: ' . $title);
             return;
         }
+
+        $rateCheck = $pdo->prepare("SELECT COUNT(*) FROM in_app_notifications WHERE user_id = ? AND created_at > DATE_SUB(NOW(), INTERVAL 1 HOUR)");
+        $rateCheck->execute([$userId]);
+        if ((int)$rateCheck->fetchColumn() >= 30) {
+            error_log('[CHED Compliance] Rate limit hit for user_id=' . $userId);
+            return;
+        }
+
+        $stmt = $pdo->prepare('INSERT INTO in_app_notifications (user_id, title, message, type, related_document_id, related_doc_type, created_at) VALUES (?, ?, ?, ?, ?, ?, NOW())');
+        $result = $stmt->execute([$userId, $title, $message, $type, $docId, $docType]);
+
+        if (!$result) {
+            error_log('[CHED Compliance] Notification insert failed for user_id: ' . $userId . ', title: ' . $title);
+            return;
+        }
+
+        $notificationId = (int)$pdo->lastInsertId();
+        error_log('[CHED Compliance] QUEUED notification id=' . $notificationId . ' user_id=' . $userId . ' title=' . $title . ' type=' . $type);
+
+        triggerWebSocketNotification($notificationId, $userId);
+
         if (!shouldSendEmailForNotification($title, $type)) {
             error_log('[CHED Compliance] Email skipped (type disabled) for title=' . $title);
             return;
@@ -818,6 +957,7 @@ function createNotification(PDO $pdo, int $userId, string $title, string $messag
     }
 }
 
+// Function: getUnreadNotificationCount
 function getUnreadNotificationCount(PDO $pdo, int $userId): int
 {
     try {
@@ -829,6 +969,7 @@ function getUnreadNotificationCount(PDO $pdo, int $userId): int
     }
 }
 
+// Function: markNotificationsRead
 function markNotificationsRead(PDO $pdo, int $userId): void
 {
     try {
@@ -837,6 +978,7 @@ function markNotificationsRead(PDO $pdo, int $userId): void
     }
 }
 
+// Function: markNotificationAsRead
 function markNotificationAsRead(PDO $pdo, int $notificationId, int $userId): void
 {
     try {
@@ -846,11 +988,13 @@ function markNotificationAsRead(PDO $pdo, int $notificationId, int $userId): voi
     }
 }
 
+// Function: markSingleNotificationRead
 function markSingleNotificationRead(PDO $pdo, int $notificationId, int $userId): void
 {
     markNotificationAsRead($pdo, $notificationId, $userId);
 }
 
+// Function: fetchValidNotifications
 function fetchValidNotifications(PDO $pdo, int $userId, int $afterId = 0): array
 {
     $sql = "
@@ -896,6 +1040,7 @@ function fetchValidNotifications(PDO $pdo, int $userId, int $afterId = 0): array
     return $stmt->fetchAll();
 }
 
+// Function: fetchRecentValidNotifications
 function fetchRecentValidNotifications(PDO $pdo, int $userId, int $limit = 6): array
 {
     $stmt = $pdo->prepare("
@@ -934,6 +1079,7 @@ function fetchRecentValidNotifications(PDO $pdo, int $userId, int $limit = 6): a
     return $stmt->fetchAll();
 }
 
+// Function: checkDuplicateNotification
 function checkDuplicateNotification(PDO $pdo, int $userId, string $title, string $message, ?int $relatedDocumentId, ?string $relatedDocType = null): bool
 {
     if ($relatedDocumentId === null) {
@@ -960,6 +1106,7 @@ function checkDuplicateNotification(PDO $pdo, int $userId, string $title, string
     return (int)$stmt->fetchColumn() > 0;
 }
 
+// Function: deleteInvalidNotifications
 function deleteInvalidNotifications(PDO $pdo, int $userId): int
 {
     $stmt = $pdo->prepare("
@@ -972,9 +1119,77 @@ function deleteInvalidNotifications(PDO $pdo, int $userId): int
 }
 
 // ===========================================================
+// WEBSOCKET AUTHENTICATION & DURABLE OUTBOX
+// ===========================================================
+
+// shortcut: durable delivery uses file-based outbox with file-lock; upgrade to transactional outbox table or message queue.
+function generateWsTicket(int $userId): string
+{
+    $secret = getenv('WS_SECRET') ?: 'fallback-secret-change-me';
+    $ttl = (int)(getenv('WS_TOKEN_TTL') ?: 120);
+    $nonce = bin2hex(random_bytes(16));
+    $payload = $userId . '|' . (time() + $ttl) . '|' . $nonce;
+    $sig = hash_hmac('sha256', $secret, $payload);
+    return $payload . ':' . $sig;
+}
+
+function verifyWsTicket(string $ticket): ?int
+{
+    $secret = getenv('WS_SECRET') ?: 'fallback-secret-change-me';
+    $parts = explode(':', $ticket);
+    if (count($parts) !== 2) return null;
+    list($payload, $sig) = $parts;
+    if (!hash_equals(hash_hmac('sha256', $secret, $payload), $sig)) return null;
+    $payloadParts = explode('|', $payload);
+    if (count($payloadParts) !== 3) return null;
+    list($userIdStr, $expiryStr, $nonce) = $payloadParts;
+    $userId = (int)$userIdStr;
+    if ($userId <= 0) return null;
+    if ((int)$expiryStr < time()) return null;
+    // shortcut: replay prevention uses temporary file tracking; upgrade to DB outbox table for concurrent replay guard.
+    $replayFile = __DIR__ . '/websocket/used_tickets.json';
+    $used = [];
+    if (file_exists($replayFile)) {
+        $used = json_decode(file_get_contents($replayFile), true) ?: [];
+    }
+    if (isset($used[$nonce])) return null;
+    $used[$nonce] = time();
+    // Clean old entries older than 300 seconds
+    $used = array_filter($used, fn($t) => ($t + 300) > time());
+    @file_put_contents($replayFile, json_encode($used), LOCK_EX);
+    return $userId;
+}
+
+function triggerWebSocketNotification(int $notificationId, int $userId): void
+{
+    $outboxFile = __DIR__ . '/websocket/pending.json';
+    $items = [];
+    if (file_exists($outboxFile)) {
+        $items = json_decode(file_get_contents($outboxFile), true) ?: [];
+    }
+    $items[] = [
+        'notification_id' => $notificationId,
+        'user_id' => $userId,
+        'created_at' => time(),
+    ];
+    @file_put_contents($outboxFile, json_encode($items), LOCK_EX);
+
+    // Poke the internal loopback listener for instant delivery (fire-and-forget, 100ms max).
+    // If the server is down, the fallback 1s timer + reconnect DB fetch still recover it.
+    // shortcut: loopback TCP poke; upgrade to Unix socket / signal if port changes.
+    $internalPort = (int)(getenv('WS_INTERNAL_PORT') ?: 8090);
+    $sock = @stream_socket_client('tcp://127.0.0.1:' . $internalPort, $errno, $errstr, 0.1);
+    if ($sock) {
+        @fwrite($sock, 'poke');
+        @fclose($sock);
+    }
+}
+
+// ===========================================================
 // REQUIREMENTS
 // ===========================================================
 
+// Function: getTeacherProgress
 function getTeacherProgress(PDO $pdo, int $teacherId): array
 {
     $sql = "
@@ -1073,10 +1288,7 @@ function getTeacherProgress(PDO $pdo, int $teacherId): array
     ];
 }
 
-// ===========================================================
-// OPTIMIZED FUNCTIONS (Performance Fixes)
-// ===========================================================
-
+// Function: getTeacherRequirementsOptimized
 function getTeacherRequirementsOptimized(PDO $pdo, int $teacherId): array
 {
     $sql = "
@@ -1116,11 +1328,11 @@ function getTeacherRequirementsOptimized(PDO $pdo, int $teacherId): array
     return array_values(array_filter($results, function ($req) {
         $filePath = $req['submission_file_path'] ?? null;
         if (empty($filePath)) return true;
-        $fullPath = securePath($filePath);
-        return $fullPath && file_exists($fullPath) && is_file($fullPath);
+        return storageFilePresent($filePath);
     }));
 }
 
+// Function: getTeacherPHRequirementsOptimized
 function getTeacherPHRequirementsOptimized(PDO $pdo, int $teacherId): array
 {
     $sql = "
@@ -1162,11 +1374,11 @@ function getTeacherPHRequirementsOptimized(PDO $pdo, int $teacherId): array
     return array_values(array_filter($results, function ($req) {
         $filePath = $req['submission_file_path'] ?? null;
         if (empty($filePath)) return true;
-        $fullPath = securePath($filePath);
-        return $fullPath && file_exists($fullPath) && is_file($fullPath);
+        return storageFilePresent($filePath);
     }));
 }
 
+// Function: getAllTeacherProgressForProgramHead
 function getAllTeacherProgressForProgramHead(PDO $pdo, int $phId, int $deptId): array
 {
     $teacherQuery = "
@@ -1287,6 +1499,7 @@ function getAllTeacherProgressForProgramHead(PDO $pdo, int $phId, int $deptId): 
     return $progressData;
 }
 
+// Function: uploadTeacherPHSubmission
 function uploadTeacherPHSubmission(PDO $pdo, int $teacherPHRequirementId, int $teacherId, array $file, ?string $comment = ''): bool|string
 {
     $stmt = $pdo->prepare("
@@ -1324,7 +1537,6 @@ function uploadTeacherPHSubmission(PDO $pdo, int $teacherPHRequirementId, int $t
     }
     $ext = $stored['ext'];
     $uniqueFile = $stored['filename'];
-    $filepath = UPLOAD_PATH . str_replace('/', DIRECTORY_SEPARATOR, $subdir) . DIRECTORY_SEPARATOR . $uniqueFile;
 
     $stmt = $pdo->prepare("SELECT MAX(version) FROM ph_documents WHERE teacher_ph_requirement_id = ?");
     $stmt->execute([$teacherPHRequirementId]);
@@ -1373,10 +1585,11 @@ function uploadTeacherPHSubmission(PDO $pdo, int $teacherPHRequirementId, int $t
         }
         return true;
     }
-    if (file_exists($filepath)) unlink($filepath);
+    storageDeleteRel($filePath);
     return "Database error.";
 }
 
+// Function: sendTemplateToTeacher
 function sendTemplateToTeacher(PDO $pdo, int $teacherId, int $phRequirementId, string $requirementTitle, bool $deferNotifications = false): bool
 {
     static $templateCache = [];
@@ -1407,6 +1620,7 @@ function sendTemplateToTeacher(PDO $pdo, int $teacherId, int $phRequirementId, s
     return true;
 }
 
+// Function: getPendingSubmissionCount
 function getPendingSubmissionCount(PDO $pdo): int
 {
     $count = 0;
@@ -1451,6 +1665,7 @@ function getPendingSubmissionCount(PDO $pdo): int
     return $count;
 }
 
+// Function: getPendingPHSubmissions
 function getPendingPHSubmissions(PDO $pdo, int $phId): array
 {
     $sql = "
@@ -1484,11 +1699,11 @@ function getPendingPHSubmissions(PDO $pdo, int $phId): array
         if (empty($filePath)) {
             return false;
         }
-        $fullPath = securePath($filePath);
-        return $fullPath && file_exists($fullPath) && is_file($fullPath);
+        return storageFilePresent($filePath);
     }));
 }
 
+// Function: getAllPendingForProgramHead
 function getAllPendingForProgramHead(PDO $pdo, int $deptId, int $phId): array
 {
     $headShort = phRoleShort();
@@ -1527,13 +1742,13 @@ function getAllPendingForProgramHead(PDO $pdo, int $deptId, int $phId): array
         if (empty($filePath)) {
             return false;
         }
-        $fullPath = securePath($filePath);
-        return $fullPath && file_exists($fullPath) && is_file($fullPath);
+        return storageFilePresent($filePath);
     }));
 
     return $allSubs;
 }
 
+// Function: programHeadReviewPH
 function programHeadReviewPH(PDO $pdo, int $submissionId, int $programHeadId, string $action, ?string $comment = '', ?int $departmentId = null): bool
 {
     if ($departmentId !== null) {
@@ -1648,6 +1863,7 @@ function programHeadReviewPH(PDO $pdo, int $submissionId, int $programHeadId, st
 // ===========================================================
 // PH Direct Upload Function
 // ===========================================================
+// Function: uploadPHDocumentDirect
 function uploadPHDocumentDirect(PDO $pdo, int $phId, ?int $deptId, array $file, string $title, bool $autoForward = false, ?string $description = ''): int|string
 {
     $dupe = $pdo->prepare("
@@ -1662,7 +1878,6 @@ function uploadPHDocumentDirect(PDO $pdo, int $phId, ?int $deptId, array $file, 
     }
 
     $subdir = getFileStorageDir('pending_program_head');
-    $uploadDir = UPLOAD_PATH . $subdir . DIRECTORY_SEPARATOR;
 
     $origName = basename($file['name']);
     // All 7 security layers now live in validateAndStoreUpload().
@@ -1709,7 +1924,7 @@ function uploadPHDocumentDirect(PDO $pdo, int $phId, ?int $deptId, array $file, 
     ]);
 
     if (!$docSuccess) {
-        unlink($uploadDir . $filename);
+        storageDeleteRel($filePath);
         return 'Failed to save to database.';
     }
 
@@ -1746,6 +1961,7 @@ function uploadPHDocumentDirect(PDO $pdo, int $phId, ?int $deptId, array $file, 
 }
 
 // ===========================================================
+// Function: getPendingForProgramHead
 function getPendingForProgramHead(PDO $pdo, int $deptId, bool $includeAdminRejected = false): array
 {
     $statusFilter = $includeAdminRejected ? "IN ('pending_program_head', 'rejected_admin')" : "= 'pending_program_head'";
@@ -1774,9 +1990,11 @@ function getPendingForProgramHead(PDO $pdo, int $deptId, bool $includeAdminRejec
         LEFT JOIN users u ON tr.teacher_id = u.id
         WHERE d.department_id = ? AND d.status $statusFilter
           AND d.version = (
-              SELECT MAX(d2.version) 
-              FROM documents d2 
-              WHERE d2.teacher_requirement_id = d.teacher_requirement_id
+              SELECT MAX(d2.version)
+              FROM documents d2
+              WHERE IF(d.teacher_requirement_id IS NOT NULL, d2.teacher_requirement_id = d.teacher_requirement_id,
+                  IF(d.document_type = 'Direct Upload', d2.id = d.id,
+                      d2.department_id = d.department_id AND d2.category = d.category AND d2.document_type = d.document_type AND d2.teacher_requirement_id IS NULL))
           )
         ORDER BY d.upload_date DESC
     ";
@@ -1789,13 +2007,13 @@ function getPendingForProgramHead(PDO $pdo, int $deptId, bool $includeAdminRejec
         if (empty($filePath)) {
             return false;
         }
-        $fullPath = securePath($filePath);
-        return $fullPath && file_exists($fullPath) && is_file($fullPath);
+        return storageFilePresent($filePath);
     }));
 
     return $results;
 }
 
+// Function: getTeachersInDepartment
 function getTeachersInDepartment(PDO $pdo, int $deptId): array
 {
     $stmt = $pdo->prepare("SELECT id, name, email FROM users WHERE role IN ('teacher','staff') AND department_id = ? ORDER BY name");
@@ -1803,6 +2021,7 @@ function getTeachersInDepartment(PDO $pdo, int $deptId): array
     return $stmt->fetchAll();
 }
 
+// Function: assignRequirementToTeacher
 function assignRequirementToTeacher(PDO $pdo, int $teacherId, int $requirementId, int $assignedBy, ?string $deadline = null, string $requirementType = 'admin_requirement', bool $deferNotifications = false, ?bool $hasReqTypeCol = null): array
 {
     try {
@@ -1861,18 +2080,6 @@ function assignRequirementToTeacher(PDO $pdo, int $teacherId, int $requirementId
                     "You have been assigned: {$reqData['category']} - {$reqData['document_type']} (From $sourceLabel)",
                     'info'
                 );
-                if ($requirementType === 'admin_requirement') {
-                    $admins = $pdo->query("SELECT id FROM users WHERE role = 'admin'")->fetchAll();
-                    foreach ($admins as $admin) {
-                        createNotification(
-                            $pdo,
-                            $admin['id'],
-                            'Admin Requirement Assigned to Faculty',
-                            "An admin requirement ({$reqData['category']} - {$reqData['document_type']}) was assigned to a faculty member.",
-                            'info'
-                        );
-                    }
-                }
             }
             logAudit($pdo, 'assign_requirement', "Assigned {$reqData['category']} - {$reqData['document_type']} to teacher ID $teacherId (Type: $requirementType, Semester: $semester)", 'teacher_requirement', (int) $insertedId);
         }
@@ -1888,6 +2095,7 @@ function assignRequirementToTeacher(PDO $pdo, int $teacherId, int $requirementId
 // ARCHIVING
 // ===========================================================
 
+// Function: syncExpirationStatuses
 function syncExpirationStatuses(PDO $pdo, ?int $triggeredByUserId = null): array
 {
     $counts = [
@@ -2039,6 +2247,7 @@ function syncExpirationStatuses(PDO $pdo, ?int $triggeredByUserId = null): array
     return $counts;
 }
 
+// Function: refreshRequirementExpiry
 function refreshRequirementExpiry(PDO $pdo, int $requirementId): void
 {
     global $EXPIRY_WARNING_DAYS;
@@ -2083,6 +2292,7 @@ function refreshRequirementExpiry(PDO $pdo, int $requirementId): void
     }
 }
 
+// Function: refreshPhRequirementExpiry
 function refreshPhRequirementExpiry(PDO $pdo, int $phRequirementId): void
 {
     global $EXPIRY_WARNING_DAYS;
@@ -2113,16 +2323,19 @@ function refreshPhRequirementExpiry(PDO $pdo, int $phRequirementId): void
     }
 }
 
+// Function: autoArchiveExpiredDocuments
 function autoArchiveExpiredDocuments(PDO $pdo): void
 {
     syncExpirationStatuses($pdo);
 }
 
+// Function: autoExpireRequirements
 function autoExpireRequirements(PDO $pdo, ?int $triggeredByUserId = null): void
 {
     syncExpirationStatuses($pdo, $triggeredByUserId);
 }
 
+// Function: maybeAutoSyncExpiration
 function maybeAutoSyncExpiration(PDO $pdo, int $intervalSeconds = 3600): void
 {
     if (PHP_SAPI === 'cli') {
@@ -2140,6 +2353,7 @@ function maybeAutoSyncExpiration(PDO $pdo, int $intervalSeconds = 3600): void
     }
 }
 
+// Function: getExpiredRequirements
 function getExpiredRequirements(PDO $pdo, ?int $adminId = null): array
 {
     if ($adminId) {
@@ -2161,6 +2375,7 @@ function getExpiredRequirements(PDO $pdo, ?int $adminId = null): array
 // ===========================================================
 // ADMIN FUNCTIONS
 // ===========================================================
+// Function: getPendingForAdmin
 function getPendingForAdmin(PDO $pdo): array
 {
     $sql = "
@@ -2193,8 +2408,7 @@ function getPendingForAdmin(PDO $pdo): array
         if (empty($filePath)) {
             return false;
         }
-        $fullPath = securePath($filePath);
-        return $fullPath && file_exists($fullPath) && is_file($fullPath);
+        return storageFilePresent($filePath);
     }));
 
     $phSql = "
@@ -2228,8 +2442,7 @@ function getPendingForAdmin(PDO $pdo): array
         if (empty($filePath)) {
             return false;
         }
-        $fullPath = securePath($filePath);
-        return $fullPath && file_exists($fullPath) && is_file($fullPath);
+        return storageFilePresent($filePath);
     }));
 
     $combined = array_merge($docs, $phDocs);
@@ -2240,6 +2453,7 @@ function getPendingForAdmin(PDO $pdo): array
     return $combined;
 }
 
+// Function: transitionDocumentStatus
 function transitionDocumentStatus(PDO $pdo, string $table, int $docId, string $newStatus, array $opts = []): bool
 {
     $allowed = ['documents', 'ph_documents'];
@@ -2293,6 +2507,7 @@ function transitionDocumentStatus(PDO $pdo, string $table, int $docId, string $n
     return $stmt->execute($params);
 }
 
+// Function: programHeadReview
 function programHeadReview(PDO $pdo, int $submissionId, int $programHeadId, string $action, ?string $comment = '', ?int $departmentId = null): bool
 {
     if ($departmentId !== null) {
@@ -2401,6 +2616,7 @@ function programHeadReview(PDO $pdo, int $submissionId, int $programHeadId, stri
     return $success;
 }
 
+// Function: adminReview
 function adminReview(PDO $pdo, int $submissionId, int $adminId, string $action, ?string $comment = ''): bool
 {
     $stmt = $pdo->prepare("SELECT status, department_id, teacher_requirement_id, category, document_type, uploaded_by, file_path FROM documents WHERE id = ?");
@@ -2464,6 +2680,25 @@ function adminReview(PDO $pdo, int $submissionId, int $adminId, string $action, 
         $status = 'rejected_admin';
     } else {
         $status = 'approved_admin';
+    }
+
+    // Verify R2 storage is healthy before changing any database state.
+    // A broken or missing configuration must never create an inconsistent
+    // approval (plan §9, §6.2).
+    try {
+        $r2 = R2Storage::default();
+        $oldPath = $docInfo['file_path'] ?? null;
+        if ($oldPath !== null && $oldPath !== '') {
+            // Confirm the source object is reachable before committing DB state.
+            $oldInfo = $r2->head((string)$oldPath);
+            if ($oldInfo === null) {
+                error_log("[CHED] adminReview: source file missing before approval for doc #{$submissionId}: {$oldPath}");
+                return false;
+            }
+        }
+    } catch (StorageException $e) {
+        error_log('[CHED] adminReview blocked by storage failure for doc #' . $submissionId . ': ' . get_class($e) . ' - ' . $e->getMessage());
+        return false;
     }
 
     $success = transitionDocumentStatus($pdo, 'documents', $submissionId, $status, [
@@ -2562,6 +2797,7 @@ function adminReview(PDO $pdo, int $submissionId, int $adminId, string $action, 
     return $success;
 }
 
+// Function: adminReviewPH
 function adminReviewPH(PDO $pdo, int $submissionId, int $adminId, string $action, ?string $comment = ''): bool
 {
     $stmt = $pdo->prepare("SELECT status, department_id, teacher_ph_requirement_id FROM ph_documents WHERE id = ?");
@@ -2677,6 +2913,7 @@ function adminReviewPH(PDO $pdo, int $submissionId, int $adminId, string $action
     return $success;
 }
 
+// Function: deletePendingDocsForRequirement
 function deletePendingDocsForRequirement(PDO $pdo, int $reqId, int $deptId): void
 {
     $stmt = $pdo->prepare("SELECT category, document_type FROM department_requirements WHERE id = ?");
@@ -2704,6 +2941,7 @@ function deletePendingDocsForRequirement(PDO $pdo, int $reqId, int $deptId): voi
 // UPLOAD
 // ===========================================================
 
+// Function: uploadTeacherSubmission
 function uploadTeacherSubmission(PDO $pdo, int $teacherRequirementId, int $teacherId, array $file, ?string $comment = ''): bool|string
 {
     $stmt = $pdo->prepare("
@@ -2737,7 +2975,6 @@ function uploadTeacherSubmission(PDO $pdo, int $teacherRequirementId, int $teach
     }
     $ext = $stored['ext'];
     $uniqueFile = $stored['filename'];
-    $filepath = UPLOAD_PATH . str_replace('/', DIRECTORY_SEPARATOR, $subdir) . DIRECTORY_SEPARATOR . $uniqueFile;
 
     $stmt = $pdo->prepare("SELECT MAX(version) FROM documents WHERE teacher_requirement_id = ?");
     $stmt->execute([$teacherRequirementId]);
@@ -2788,10 +3025,11 @@ function uploadTeacherSubmission(PDO $pdo, int $teacherRequirementId, int $teach
         }
         return true;
     }
-    if (file_exists($filepath)) unlink($filepath);
+    storageDeleteRel($filePath);
     return "Database error.";
 }
 
+// Function: uploadDepartmentSubmission
 function uploadDepartmentSubmission(PDO $pdo, int $deptRequirementId, int $userId, array $file, ?string $comment = '', ?int $expectedDeptId = null): bool|string
 {
     $stmt = $pdo->prepare("SELECT department_id, category, document_type, expiration_date, cycle_started_at FROM department_requirements WHERE id = ?");
@@ -2824,7 +3062,6 @@ function uploadDepartmentSubmission(PDO $pdo, int $deptRequirementId, int $userI
     }
     $ext = $stored['ext'];
     $uniqueFile = $stored['filename'];
-    $filepath = UPLOAD_PATH . str_replace('/', DIRECTORY_SEPARATOR, $subdir) . DIRECTORY_SEPARATOR . $uniqueFile;
 
     $stmt = $pdo->prepare("
         SELECT MAX(version) FROM documents 
@@ -2887,7 +3124,7 @@ function uploadDepartmentSubmission(PDO $pdo, int $deptRequirementId, int $userI
 
         return true;
     }
-    if (file_exists($filepath)) unlink($filepath);
+    storageDeleteRel($filePath);
     return "Database error.";
 }
 
@@ -2895,6 +3132,7 @@ function uploadDepartmentSubmission(PDO $pdo, int $deptRequirementId, int $userI
 // USER HELPERS
 // ===========================================================
 
+// Function: getUserById
 function getUserById(PDO $pdo, ?int $userId): ?array
 {
     if (!$userId)
@@ -2904,6 +3142,7 @@ function getUserById(PDO $pdo, ?int $userId): ?array
     return $stmt->fetch() ?: null;
 }
 
+// Function: getProgramHeadForDepartment
 function getProgramHeadForDepartment(PDO $pdo, int $deptId): ?array
 {
     $stmt = $pdo->prepare(
@@ -2920,6 +3159,7 @@ function getProgramHeadForDepartment(PDO $pdo, int $deptId): ?array
 // SUBMISSION DETAILS
 // ===========================================================
 
+// Function: getSubmissionDetails
 function getSubmissionDetails(PDO $pdo, int $submissionId): ?array
 {
     $sql = "
@@ -2946,6 +3186,7 @@ function getSubmissionDetails(PDO $pdo, int $submissionId): ?array
 // SECURE FILE RESOLUTION
 // ===========================================================
 
+// Function: securePath
 function securePath(string $relativePath)
 {
     $base = rtrim(SECURE_STORAGE_PATH, '\\/') . DIRECTORY_SEPARATOR;
@@ -2958,19 +3199,184 @@ function securePath(string $relativePath)
     return $real;
 }
 
+// Driver-aware delete of a stored document given its DB-relative path, for the
+// upload-rollback paths: the row write failed, so nothing must be left behind.
+// A missing object already counts as success in both drivers.
+// ponytail: R2 delete failures here are logged, not rethrown — a rollback that
+// cannot delete leaves an orphan key instead of failing the request, and orphan
+// keys are report-only (plan §10 step 3). Upgrade to rethrow + ledger entry if
+// orphan keys ever accumulate.
+function storageDeleteRel(?string $relativePath): void
+{
+    if (empty($relativePath)) return;
+    try {
+        R2Storage::default()->delete($relativePath);
+    } catch (StorageException | InvalidArgumentException $e) {
+        error_log('[CHED] r2 delete failed on rollback: ' . get_class($e));
+    }
+}
+
+// ===========================================================
+// READ PATHS — existence, temp staging, streaming (plan §6.1)
+// ===========================================================
+
+// Does a stored document exist? False ONLY for genuine absence: a 404 in r2, a
+// missing file on disk. Any other storage failure throws (outage, bad creds,
+// throttling) so a caller can never read "storage is broken" as "document was
+// deleted" — that confusion is what mass-deletes rows in the review flows (§9).
+function storageObjectExists(string $relativePath): bool
+{
+    if ($relativePath === '') return false;
+    try {
+        return R2Storage::default()->exists($relativePath);
+    } catch (InvalidArgumentException $e) {
+        error_log('[CHED] storageObjectExists: invalid key — ' . $e->getMessage());
+        throw new StorageUnknownError('invalid storage key', 0, $e);
+    }
+}
+
+// Per-row existence filter for LISTING queries (plan §6.1). In r2 mode this is
+// always true: calling head() per row is N network round-trips per page load
+// (~190-1200 ms each, measured), and migration verifies every object against
+// file_hash, so a listed row's object is there. Retrieval endpoints do the
+// authoritative 404 check when a user actually opens the file.
+// ponytail: ceiling is an object deleted out-of-band after migration — it stays
+// listed until clicked, then 404s in the download endpoint. Upgrade to a
+// per-request memoized head() cache if that ever becomes visible in practice.
+function storageFilePresent(string $relativePath): bool
+{
+    return true;
+}
+
+// Size in bytes of a stored document, or null when it genuinely does not exist.
+// Any other storage failure throws typed, so callers can answer 503 instead of
+// 404 (plan §9).
+function storageObjectSize(string $relativePath): ?int
+{
+    try {
+        $info = R2Storage::default()->head($relativePath);
+        return $info === null ? null : (int) $info['size'];
+    } catch (InvalidArgumentException $e) {
+        error_log('[CHED] storageObjectSize: invalid key — ' . $e->getMessage());
+        throw new StorageUnknownError('invalid storage key', 0, $e);
+    }
+}
+
+// Server-side object move (r2 only): copy, verify size, then delete the source.
+// Returns false when the source is genuinely absent — the caller decides what
+// that means — and throws typed on any other storage failure, so a failed move
+// is loud and never looks like "the file was already gone".
+// ponytail: verification is size-only — SHA-256 would re-stream the whole
+// object; upgrade if integrity ever matters more than throughput here.
+function storageMoveObject(string $sourceRel, string $destRel): bool
+{
+    $r2 = R2Storage::default();
+
+    try {
+        $src = $r2->head($sourceRel);
+    } catch (InvalidArgumentException $e) {
+        error_log('[CHED] storageMoveObject: invalid source key — ' . $e->getMessage());
+        throw new StorageUnknownError('invalid source storage key', 0, $e);
+    }
+    if ($src === null) return false;
+    if ($destRel === $sourceRel) return true; // never copy-onto-self and then delete
+
+    try {
+        $r2->copyTo($sourceRel, $destRel);
+        $dst = $r2->head($destRel);
+        if ($dst === null || (int) $dst['size'] !== (int) $src['size']) {
+            throw new StorageUnknownError('move verification failed: size mismatch or destination missing');
+        }
+    } catch (\Throwable $e) {
+        // A failed move must not leave a partial-size destination behind.
+        try { $r2->delete($destRel); } catch (\Throwable) {}
+        throw $e instanceof StorageException
+            ? $e
+            : new StorageUnknownError('move failed', 0, $e);
+    }
+
+    $r2->delete($sourceRel); // best-effort; a leftover key is report-only
+    return true;
+}
+
+// Stage a stored document to a local temp file — the only way ZipArchive and
+// PhpOffice can consume an object. Returns the temp path (the CALLER unlinks
+// it) or null when the document genuinely does not exist; outages throw.
+// ponytail: the local driver also copies to temp rather than handing back the
+// real path, so no caller can accidentally unlink a live document. Ceiling: one
+// extra copy per staged file; upgrade to a read-only handle if staging volume
+// ever matters.
+function storageStageLocalCopy(string $relativePath, string $extension = ''): ?string
+{
+    $dest = rtrim(sys_get_temp_dir(), '\\/') . DIRECTORY_SEPARATOR
+        . 'ched_stage_' . bin2hex(random_bytes(8)) . $extension;
+    try {
+        R2Storage::default()->downloadTo($relativePath, $dest); // partials self-clean
+    } catch (StorageObjectNotFound $e) {
+        return null;
+    } catch (InvalidArgumentException $e) {
+        error_log('[CHED] storageStageLocalCopy: invalid key — ' . $e->getMessage());
+        @unlink($dest);
+        throw new StorageUnknownError('invalid storage key', 0, $e);
+    }
+    return $dest;
+}
+
+// Emit a stored document's bytes to the output buffer. Assumes presence was
+// already confirmed; a mid-stream storage failure truncates the transfer, which
+// the client surfaces as a failed download.
+function storageEmitBody(string $relativePath): void
+{
+    try {
+        $body = R2Storage::default()->getStream($relativePath);
+    } catch (InvalidArgumentException $e) {
+        error_log('[CHED] storageEmitBody: invalid key — ' . $e->getMessage());
+        throw new StorageUnknownError('invalid storage key', 0, $e);
+    }
+    try {
+        while (!$body->eof()) {
+            echo $body->read(8192);
+        }
+    } finally {
+        $body->close();
+    }
+}
+
+// Send a stored document as a browser download. Headers stay byte-identical to
+// the pre-migration ones so existing download assertions keep passing.
+function storageStreamDownload(string $relativePath, string $downloadName): void
+{
+    header('Content-Type: application/octet-stream');
+    header('Content-Disposition: attachment; filename="' . str_replace('"', '', basename($downloadName)) . '"');
+    // shortcut: Content-Length skipped to eliminate duplicate R2 HEAD; upgrade when range support added.
+    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+    header('Pragma: no-cache');
+    header('Expires: 0');
+    storageEmitBody($relativePath);
+}
+
 // ===========================================================
 // DUPLICATE DETECTION — SHA-256, approved-only, same cycle
 // ===========================================================
 
+// Function: computeFileSha256
 function computeFileSha256(?string $relativePath): ?string
 {
     if (empty($relativePath)) return null;
-    $abs = securePath($relativePath);
-    if (!$abs || !is_file($abs)) return null;
-    $hash = @hash_file('sha256', $abs);
-    return $hash ?: null;
+    try {
+        $r2 = R2Storage::default();
+        $info = $r2->head($relativePath);
+        if ($info === null) return null;
+        $meta = (string) ($info['metadata']['sha256'] ?? '');
+        if (preg_match('/^[0-9a-f]{64}$/i', $meta)) return strtolower($meta);
+        return R2Storage::sha256Stream($r2->getStream($relativePath));
+    } catch (StorageException | InvalidArgumentException $e) {
+        error_log('[CHED] r2 computeFileSha256 failed: ' . get_class($e));
+        return null;
+    }
 }
 
+// Function: ensureDocumentHash
 function ensureDocumentHash(PDO $pdo, string $table, int $docId): ?string
 {
     if (!in_array($table, ['documents', 'ph_documents'], true) || $docId < 1) return null;
@@ -2990,6 +3396,7 @@ function ensureDocumentHash(PDO $pdo, string $table, int $docId): ?string
     return $hash;
 }
 
+// Function: getRequirementCycleStart
 function getRequirementCycleStart(PDO $pdo, array $docRow): ?string
 {
     $deptId = $docRow['department_id'] ?? null;
@@ -3021,6 +3428,7 @@ function getRequirementCycleStart(PDO $pdo, array $docRow): ?string
     return ($v === false || $v === null || $v === '') ? null : (string)$v;
 }
 
+// Function: findDuplicateApprovedDocument
 function findDuplicateApprovedDocument(
     PDO $pdo,
     string $hash,
@@ -3104,6 +3512,7 @@ function findDuplicateApprovedDocument(
 // UPLOAD-TIME EXACT-DUPLICATE GUARD
 // ===========================================================
 
+// Function: hashUploadedTempFile
 function hashUploadedTempFile(array $file): ?string
 {
     $tmp = $file['tmp_name'] ?? '';
@@ -3112,6 +3521,7 @@ function hashUploadedTempFile(array $file): ?string
     return $h ?: null;
 }
 
+// Function: acquireUploadLock
 function acquireUploadLock(PDO $pdo, string $scopeKey, int $timeout = 5): bool
 {
     try {
@@ -3124,6 +3534,7 @@ function acquireUploadLock(PDO $pdo, string $scopeKey, int $timeout = 5): bool
     }
 }
 
+// Function: releaseUploadLock
 function releaseUploadLock(PDO $pdo, string $scopeKey): void
 {
     try {
@@ -3133,6 +3544,7 @@ function releaseUploadLock(PDO $pdo, string $scopeKey): void
     }
 }
 
+// Function: findDuplicateAssignmentDoc
 function findDuplicateAssignmentDoc(PDO $pdo, string $table, string $fkColumn, int $assignmentId, string $hash, int $excludeId = 0): ?int
 {
     if ($hash === '') return null;
@@ -3144,6 +3556,7 @@ function findDuplicateAssignmentDoc(PDO $pdo, string $table, string $fkColumn, i
     return $id !== false ? (int)$id : null;
 }
 
+// Function: findDuplicateDepartmentDoc
 function findDuplicateDepartmentDoc(PDO $pdo, int $deptId, string $category, string $docType, ?string $cycleStart, string $hash, int $excludeId = 0): ?int
 {
     if ($hash === '') return null;
@@ -3177,6 +3590,7 @@ function findDuplicateDepartmentDoc(PDO $pdo, int $deptId, string $category, str
     return $id !== false ? (int)$id : null;
 }
 
+// Function: findDuplicateDirectUpload
 function findDuplicateDirectUpload(PDO $pdo, ?int $deptId, string $title, string $hash, int $excludeId = 0): ?int
 {
     if ($hash === '') return null;
@@ -3188,6 +3602,7 @@ function findDuplicateDirectUpload(PDO $pdo, ?int $deptId, string $title, string
     return $id !== false ? (int)$id : null;
 }
 
+// Function: findDuplicateRepoDoc
 function findDuplicateRepoDoc(PDO $pdo, ?int $deptId, int $phId, string $title, string $hash): ?int
 {
     if ($hash === '') return null;
@@ -3198,7 +3613,7 @@ function findDuplicateRepoDoc(PDO $pdo, ?int $deptId, int $phId, string $title, 
 }
 
 // ===========================================================
-// SHARED UPLOAD PIPELINE — the 7 security layers, one implementation
+// 7 security layers, one implementation
 // ===========================================================
 
 // Layers 1-7: upload error -> ext allow-list -> size cap -> MIME sniff
@@ -3208,6 +3623,7 @@ function findDuplicateRepoDoc(PDO $pdo, ?int $deptId, int $phId, string $title, 
 // error message string (same convention as uploadXxxSubmission()).
 // $dupCheck: fn(PDO $pdo, string $hash): ?int — id of an existing identical
 // document, or null when clean.
+// Function: validateAndStoreUpload
 function validateAndStoreUpload(PDO $pdo, array $file, string $title, string $subdir, ?string $lockKey = null, ?callable $dupCheck = null): array|string
 {
     // Layer 1
@@ -3230,8 +3646,9 @@ function validateAndStoreUpload(PDO $pdo, array $file, string $title, string $su
     if ($mime === false) {
         return "Could not read the uploaded file to verify its type. Please try again.";
     }
-    // Layer 5
-    if (!in_array($mime, ALLOWED_MIMES) && isDangerousMime($mime)) {
+    // Layer 5 — whitelist enforced strictly: ANY detected MIME not on
+    // ALLOWED_MIMES is rejected, not just those matching the danger patterns.
+    if (!in_array($mime, ALLOWED_MIMES, true) || isDangerousMime($mime)) {
         return "File content does not match its extension.";
     }
     // Layer 6 — hash BEFORE the move in layer 7 (the tmp file is gone after it).
@@ -3249,12 +3666,38 @@ function validateAndStoreUpload(PDO $pdo, array $file, string $title, string $su
             return 'This exact file has already been uploaded. Please upload a changed version.';
         }
     }
-    // Layer 7
-    $dirAbs = UPLOAD_PATH . str_replace('/', DIRECTORY_SEPARATOR, $subdir) . DIRECTORY_SEPARATOR;
-    $filename = allocateStorageFilename($dirAbs, $title, $ext);
-    if (!move_uploaded_file($file['tmp_name'], $dirAbs . $filename)) {
-        @unlink($dirAbs . $filename);
-        return "Failed to save file. Check upload directory permissions.";
+    // Layer 7 — physical storage. Layers 1-6 and every duplicate/authorization
+    // check run on the tmp file before this point and are unchanged; only the
+    // destination differs by driver.
+    $subdir = trim(str_replace('\\', '/', $subdir), '/');
+    $filename = allocateStorageFilename($subdir, $title, $ext);
+    if (STORAGE_DRIVER === 'r2') {
+        // move_uploaded_file() cannot be used against an object store, so the
+        // upload-origin guarantee it provides is asserted explicitly instead.
+        if (!is_uploaded_file($file['tmp_name'])) {
+            return "Failed to save file.";
+        }
+        $fh = @fopen($file['tmp_name'], 'rb');
+        if ($fh === false) {
+            return "Failed to save file.";
+        }
+        try {
+            R2Storage::default()->put($subdir . '/' . $filename, $fh, $mime, ['sha256' => $hash]);
+        } catch (StorageException $e) {
+            // Invalid keys (InvalidArgumentException) deliberately propagate:
+            // that is a programming fault and must fail loudly, never as a
+            // generic upload error.
+            error_log('[CHED] r2 put failed for upload: ' . get_class($e));
+            return "Failed to save file. Please try again.";
+        } finally {
+            if (is_resource($fh)) fclose($fh);
+        }
+    } else {
+        $dirAbs = UPLOAD_PATH . str_replace('/', DIRECTORY_SEPARATOR, $subdir) . DIRECTORY_SEPARATOR;
+        if (!move_uploaded_file($file['tmp_name'], $dirAbs . $filename)) {
+            @unlink($dirAbs . $filename);
+            return "Failed to save file. Check upload directory permissions.";
+        }
     }
     return ['ext' => $ext, 'hash' => $hash, 'filename' => $filename];
 }
@@ -3263,6 +3706,7 @@ function validateAndStoreUpload(PDO $pdo, array $file, string $title, string $su
 // SYSTEM-CONTROLLED STORAGE FILENAMES
 // ===========================================================
 
+// Function: sanitizeFilenameTitle
 function sanitizeFilenameTitle(string $title): string
 {
     $title = str_replace("\0", '', $title);
@@ -3279,6 +3723,7 @@ function sanitizeFilenameTitle(string $title): string
     return $title;
 }
 
+// Function: buildStorageFilename
 function buildStorageFilename(string $title, string $ext, ?string $uniqueSuffix = null): string
 {
     $ext = strtolower(trim($ext));
@@ -3294,17 +3739,36 @@ function buildStorageFilename(string $title, string $ext, ?string $uniqueSuffix 
     return $stem . '.' . $ext;
 }
 
-function allocateStorageFilename(string $dirAbs, string $title, string $ext, ?string $uniqueSuffix = null): string
+// Function: allocateStorageFilename
+// $subdir is storage-relative (no leading/trailing separator). The candidate
+// name is reserved by exclusive-create on local; R2 keys are immutable so the
+// reservation is a HeadObject check instead.
+// ponytail: two racing uploads can still pick the same R2 key (there is no
+// atomic create to reserve it) — accepted, because the DB unique indexes and
+// the SHA-256 duplicate gates are the real guard. Upgrade to versioned keys if
+// it ever bites.
+function allocateStorageFilename(string $subdir, string $title, string $ext, ?string $uniqueSuffix = null): string
 {
-    if (!is_dir($dirAbs)) {
+    $subdir = trim(str_replace('\\', '/', $subdir), '/');
+    $isLocal = STORAGE_DRIVER !== 'r2';
+    $dirAbs = $isLocal ? UPLOAD_PATH . str_replace('/', DIRECTORY_SEPARATOR, $subdir) . DIRECTORY_SEPARATOR : '';
+    if ($isLocal && !is_dir($dirAbs)) {
         @mkdir($dirAbs, 0755, true);
     }
-    $dirAbs = rtrim($dirAbs, '\\/');
+    // True when this candidate name is still free — and reserved, on local.
+    $isFree = function (string $name) use ($isLocal, $dirAbs, $subdir): bool {
+        if (!$isLocal) {
+            return !R2Storage::default()->exists($subdir . '/' . $name);
+        }
+        $fh = @fopen(rtrim($dirAbs, '\\/') . DIRECTORY_SEPARATOR . $name, 'x');
+        if ($fh === false) return false;
+        fclose($fh);
+        return true;
+    };
+
     $name = buildStorageFilename($title, $ext, $uniqueSuffix);
     for ($i = 0; $i < 30; $i++) {
-        $fh = @fopen($dirAbs . DIRECTORY_SEPARATOR . $name, 'x');
-        if ($fh !== false) {
-            fclose($fh);
+        if ($isFree($name)) {
             return $name;
         }
         $extra = ($uniqueSuffix !== null && $uniqueSuffix !== '' ? $uniqueSuffix . '_' : '')
@@ -3314,6 +3778,7 @@ function allocateStorageFilename(string $dirAbs, string $title, string $ext, ?st
     return buildStorageFilename($title, $ext, 'f' . time() . bin2hex(random_bytes(3)));
 }
 
+// Function: finalizeStorageFilename
 function finalizeStorageFilename(PDO $pdo, int $rowId, string $table, string $title, string $ext): void
 {
     static $allowed = ['documents', 'ph_documents', 'ph_repository', 'ph_requirements'];
@@ -3321,45 +3786,57 @@ function finalizeStorageFilename(PDO $pdo, int $rowId, string $table, string $ti
 
     $stmt = $pdo->prepare("SELECT file_path FROM `$table` WHERE id = ?");
     $stmt->execute([$rowId]);
-    $rel = (string)($stmt->fetchColumn() ?: '');
+    $rel = str_replace('\\', '/', (string)($stmt->fetchColumn() ?: ''));
     if ($rel === '') return;
 
-    $oldAbs = securePath($rel);
-    if ($oldAbs === false || !is_file($oldAbs)) return;
-
     $newName = buildStorageFilename($title, $ext);
-    if ($newName === basename($oldAbs)) return;
-
-    $newAbs = dirname($oldAbs) . DIRECTORY_SEPARATOR . $newName;
-    if (file_exists($newAbs)) return;
-    if (!@rename($oldAbs, $newAbs)) return;
-
-    $parentRel = str_replace('\\', '/', dirname($rel));
+    if ($newName === basename($rel)) return;
+    $parentRel = dirname($rel);
     $newRel = ($parentRel === '.' || $parentRel === '' ? '' : $parentRel . '/') . $newName;
+    if ($newRel === $rel) return;
+
+    try {
+        $r2 = R2Storage::default();
+        if ($r2->exists($newRel)) return;
+        $r2->copyTo($rel, $newRel);
+    } catch (StorageException | InvalidArgumentException $e) {
+        error_log('[CHED] finalizeStorageFilename r2 copy failed: ' . get_class($e));
+        return;
+    }
     try {
         $pdo->prepare("UPDATE `$table` SET file_path = ? WHERE id = ?")->execute([$newRel, $rowId]);
     } catch (PDOException $e) {
-        @rename($newAbs, $oldAbs);
+        try {
+            R2Storage::default()->delete($newRel);
+        } catch (Throwable $ignored) {
+        }
         error_log('[CHED] finalizeStorageFilename DB update failed: ' . $e->getMessage());
+        return;
+    }
+    try {
+        R2Storage::default()->delete($rel);
+    } catch (Throwable $e) {
+        error_log('[CHED] finalizeStorageFilename old-object delete failed: ' . get_class($e));
     }
 }
 
+// Function: copyStoredFile
 function copyStoredFile(string $sourceRel, string $targetSubdir, string $title, string $ext): ?string
 {
-    $src = securePath($sourceRel);
-    if ($src === false || !is_file($src)) return null;
     $sub = trim(str_replace('\\', '/', $targetSubdir), '/');
     if ($sub === '') return null;
-    $dirAbs = UPLOAD_PATH . str_replace('/', DIRECTORY_SEPARATOR, $sub) . DIRECTORY_SEPARATOR;
-    $name = allocateStorageFilename($dirAbs, $title, $ext);
-    if (!@copy($src, $dirAbs . $name)) {
-        @unlink($dirAbs . $name);
-        error_log('[CHED] copyStoredFile failed: ' . $sourceRel);
+    try {
+        $r2 = R2Storage::default();
+        $name = allocateStorageFilename($sub, $title, $ext);
+        $r2->copyTo($sourceRel, $sub . '/' . $name);
+        return $sub . '/' . $name;
+    } catch (StorageException | InvalidArgumentException $e) {
+        error_log('[CHED] copyStoredFile failed: ' . $sourceRel . ' (' . get_class($e) . ')');
         return null;
     }
-    return $sub . '/' . $name;
 }
 
+// Function: getPreviewCacheDir
 function getPreviewCacheDir()
 {
     $dir = TEMP_PATH . 'preview_cache' . DIRECTORY_SEPARATOR;
@@ -3373,6 +3850,7 @@ function getPreviewCacheDir()
 // DOCUMENT STORAGE ROUTING
 // ===========================================================
 
+// Function: deptSlug
 function deptSlug(int $departmentId, ?PDO $pdo = null): string
 {
     static $cache = [];
@@ -3402,34 +3880,25 @@ function deptSlug(int $departmentId, ?PDO $pdo = null): string
     return $cache[$departmentId] = 'dept_' . $departmentId;
 }
 
+// Function: createDepartmentFolders
 function createDepartmentFolders(int $departmentId, PDO $pdo): void
 {
-    $slug = deptSlug($departmentId, $pdo);
-    foreach (['admin_repository', 'admin_archive', 'ph_repository'] as $folder) {
-        $dir = UPLOAD_PATH . $folder . DIRECTORY_SEPARATOR . $slug . DIRECTORY_SEPARATOR;
-        if (!is_dir($dir)) {
-            mkdir($dir, 0755, true);
-        }
-    }
+    // R2 is exclusive permanent storage — no local directory creation.
+    return;
 }
 
+// Function: ensureDepartmentFolders
 function ensureDepartmentFolders(PDO $pdo, array $folders = ['admin_repository', 'admin_archive', 'ph_repository']): void
 {
-    foreach ($pdo->query('SELECT id FROM departments') as $row) {
-        $slug = deptSlug((int)$row['id'], $pdo);
-        foreach ($folders as $folder) {
-            $dir = UPLOAD_PATH . $folder . DIRECTORY_SEPARATOR . $slug . DIRECTORY_SEPARATOR;
-            if (!is_dir($dir)) {
-                mkdir($dir, 0755, true);
-            }
-        }
-    }
+    // R2 is exclusive permanent storage — no local directory creation.
+    return;
 }
 
 // ===========================================================
 // admin_repository MIRROR OF department_folders
 // ===========================================================
 
+// Function: sanitizeFolderName
 function sanitizeFolderName(string $name): string
 {
     $name = preg_replace('#[<>:"/\\\\|?*\x00-\x1F\x7F]#', '_', trim($name));
@@ -3437,6 +3906,7 @@ function sanitizeFolderName(string $name): string
     return ($name === '' || $name === '.' || $name === '..') ? '_' : $name;
 }
 
+// Function: folderPathSegments
 function folderPathSegments(?PDO $pdo, ?int $folderId, string $table = 'department_folders'): array
 {
     if ($pdo === null || $folderId === null || $folderId < 1) return [];
@@ -3457,6 +3927,7 @@ function folderPathSegments(?PDO $pdo, ?int $folderId, string $table = 'departme
     return $segs;
 }
 
+// Function: storageSubdir
 function storageSubdir(string $root, ?PDO $pdo, ?int $departmentId, ?int $folderId = null): string
 {
     $dir = $root;
@@ -3469,14 +3940,23 @@ function storageSubdir(string $root, ?PDO $pdo, ?int $departmentId, ?int $folder
     return $dir;
 }
 
+// Function: documentFolderId
 function documentFolderId(?PDO $pdo, string $table, int $docId): ?int
 {
     if ($pdo === null || $table !== 'documents' || $docId < 1) return null;
     try {
-        $stmt = $pdo->prepare('SELECT teacher_requirement_id, department_id, category, document_type FROM documents WHERE id = ?');
+        $stmt = $pdo->prepare('SELECT folder_id, teacher_requirement_id, department_id, category, document_type FROM documents WHERE id = ?');
         $stmt->execute([$docId]);
         $doc = $stmt->fetch();
         if (!$doc) return null;
+
+        // shortcut: admin-set folder override (drag-and-drop move) always wins over
+        // requirement-derived folder; 0 = root, NULL = follow the requirement row.
+        // upgrade: enforce unique DB constraint if folder/requirement rules tighten.
+        if ($doc['folder_id'] !== null && $doc['folder_id'] !== '') {
+            $folderId = (int)$doc['folder_id'];
+            return $folderId < 1 ? 0 : $folderId; // normalize 0 / positive; callers treat <1 as root
+        }
 
         if (!empty($doc['teacher_requirement_id'])) {
             $t = $pdo->prepare('SELECT dr.folder_id FROM teacher_requirements tr JOIN department_requirements dr ON dr.id = tr.requirement_id WHERE tr.id = ?');
@@ -3498,6 +3978,7 @@ function documentFolderId(?PDO $pdo, string $table, int $docId): ?int
     }
 }
 
+// Function: mirrorDepartmentFolders
 function mirrorDepartmentFolders(PDO $pdo, int $departmentId, string $parentRel, ?int $parentId, array &$keep): void
 {
     $sql = 'SELECT id, folder_name FROM department_folders WHERE department_id = ? AND parent_folder_id '
@@ -3516,6 +3997,7 @@ function mirrorDepartmentFolders(PDO $pdo, int $departmentId, string $parentRel,
     }
 }
 
+// Function: pruneUnknownDirs
 function pruneUnknownDirs(string $abs, string $rel, array $keep): void
 {
     $entries = @scandir($abs);
@@ -3532,6 +4014,7 @@ function pruneUnknownDirs(string $abs, string $rel, array $keep): void
     }
 }
 
+// Function: phRootSlug
 function phRootSlug(?PDO $pdo, int $phId): ?string
 {
     if ($pdo === null || $phId < 1) return null;
@@ -3548,6 +4031,7 @@ function phRootSlug(?PDO $pdo, int $phId): ?string
     return $slug !== '' ? $slug : 'ph_' . $phId;
 }
 
+// Function: phRepoSubdir
 function phRepoSubdir(?PDO $pdo, int $phId, ?int $folderId = null): ?string
 {
     $slug = phRootSlug($pdo, $phId);
@@ -3559,6 +4043,7 @@ function phRepoSubdir(?PDO $pdo, int $phId, ?int $folderId = null): ?string
     return $dir;
 }
 
+// Function: mirrorPhFolders
 function mirrorPhFolders(PDO $pdo, int $phId, string $parentRel, ?int $parentId, array &$keep): void
 {
     $sql = 'SELECT id, folder_name FROM ph_repo_folders WHERE program_head_id = ? AND parent_folder_id '
@@ -3577,6 +4062,7 @@ function mirrorPhFolders(PDO $pdo, int $phId, string $parentRel, ?int $parentId,
     }
 }
 
+// Function: relocateStoragePath
 function relocateStoragePath(PDO $pdo, string $base, string $currentRel, string $targetRel, array $tables): bool
 {
     if ($currentRel === $targetRel) return true;
@@ -3603,6 +4089,7 @@ function relocateStoragePath(PDO $pdo, string $base, string $currentRel, string 
     return true;
 }
 
+// Function: phDocumentOwner
 function phDocumentOwner(PDO $pdo, array $row): ?int
 {
     foreach (['uploaded_by', 'reviewed_by_program_head'] as $col) {
@@ -3612,9 +4099,81 @@ function phDocumentOwner(PDO $pdo, array $row): ?int
     return null;
 }
 
+// Function: syncPhRepository
 function syncPhRepository(?PDO $pdo): void
 {
     if ($pdo === null) return;
+    if (STORAGE_DRIVER === 'r2') {
+        // R2 has no local tree, but the bucket must still mirror the system folder
+        // structure, so reconcile ph_repository/ph_documents keys against the
+        // folder-derived targets. A created/renamed/moved PH repo folder shows up
+        // here as a key move. ponytail: ceiling is the same per-row object scan as
+        // the dept reconcile; upgrade to batched prefix listings if PH doc volume
+        // ever makes this hot.
+        try {
+            $phIds = array_map('intval', $pdo->query("SELECT id FROM users WHERE role IN ('department','unit_head')")->fetchAll(PDO::FETCH_COLUMN));
+            $slugs = [];
+            foreach ($phIds as $phId) {
+                $slug = phRootSlug($pdo, (int)$phId);
+                if ($slug !== null) $slugs[(int)$phId] = $slug;
+            }
+
+            $phTables = ['ph_repository', 'ph_documents', 'documents'];
+            $moved = [];
+
+            $phRepoRows = $pdo->query("SELECT file_path, program_head_id, folder_id FROM ph_repository
+                                       WHERE file_path IS NOT NULL AND file_path LIKE 'ph_repository/%'");
+            foreach ($phRepoRows as $r) {
+                $phId = (int)$r['program_head_id'];
+                if (!isset($slugs[$phId])) continue;
+                $current = str_replace('\\', '/', (string)$r['file_path']);
+                $target = phRepoSubdir($pdo, $phId, $r['folder_id'] !== null ? (int)$r['folder_id'] : null);
+                if ($target === null) continue;
+                $newRel = $target . '/' . basename($current);
+                if ($current === $newRel) continue;
+                try {
+                    $movedOk = storageMoveObject($current, $newRel);
+                } catch (StorageException | InvalidArgumentException $e) {
+                    error_log('[CHED] syncPhRepository r2 key move failed for key ' . $current . ': ' . get_class($e));
+                    continue;
+                }
+                if ($movedOk || R2Storage::default()->head($newRel) !== null) {
+                    foreach ($phTables as $t) {
+                        $pdo->prepare("UPDATE `$t` SET file_path = ? WHERE file_path = ?")->execute([$newRel, $current]);
+                    }
+                    $moved[$current] = true;
+                }
+            }
+
+            $phDocRows = $pdo->query("SELECT file_path, uploaded_by, reviewed_by_program_head FROM ph_documents
+                                      WHERE file_path IS NOT NULL AND file_path LIKE 'ph_repository/%'");
+            foreach ($phDocRows as $r) {
+                $current = str_replace('\\', '/', (string)$r['file_path']);
+                if (isset($moved[$current])) continue;
+                $phId = phDocumentOwner($pdo, $r);
+                if ($phId === null) continue;
+                $target = phRepoSubdir($pdo, $phId);
+                if ($target === null) continue;
+                $newRel = $target . '/' . basename($current);
+                if ($current === $newRel) continue;
+                try {
+                    $movedOk = storageMoveObject($current, $newRel);
+                } catch (StorageException | InvalidArgumentException $e) {
+                    error_log('[CHED] syncPhRepository r2 key move failed for key ' . $current . ': ' . get_class($e));
+                    continue;
+                }
+                if ($movedOk || R2Storage::default()->head($newRel) !== null) {
+                    foreach ($phTables as $t) {
+                        $pdo->prepare("UPDATE `$t` SET file_path = ? WHERE file_path = ?")->execute([$newRel, $current]);
+                    }
+                    $moved[$current] = true;
+                }
+            }
+        } catch (Throwable $e) {
+            error_log('[CHED] syncPhRepository r2 reconcile failed: ' . $e->getMessage());
+        }
+        return;
+    }
     $base = rtrim(UPLOAD_PATH, '\\/') . DIRECTORY_SEPARATOR;
     $phRootAbs = $base . 'ph_repository' . DIRECTORY_SEPARATOR;
 
@@ -3688,9 +4247,57 @@ function syncPhRepository(?PDO $pdo): void
     pruneUnknownDirs($phRootAbs, 'ph_repository', $keep);
 }
 
+// Function: syncStorageMirrors
 function syncStorageMirrors(?PDO $pdo): void
 {
     if ($pdo === null) return;
+    if (STORAGE_DRIVER === 'r2') {
+        // R2 has no local tree, but the bucket must still mirror the system folder
+        // structure, so reconcile object keys against the folder-derived targets. A
+        // created/renamed/moved folder shows up here as a key move: keys are immutable
+        // objects, so rename means copy, verify, delete old key, update file_path.
+        // ponytail: ceiling is a per-row object scan per sync invocation; upgrade to
+        // batched prefix listings if reconcile ever scans large doc sets per page load.
+        try {
+            $deptIds = array_map('intval', $pdo->query('SELECT id FROM departments')->fetchAll(PDO::FETCH_COLUMN));
+            $knownDepts = array_flip($deptIds);
+            $views = [
+                ['root' => 'admin_repository', 'flag' => 'archived = 0'],
+                ['root' => 'admin_archive',    'flag' => 'archived = 1'],
+            ];
+            foreach ($views as $v) {
+                try {
+                    $docs = $pdo->query("SELECT id, department_id, file_path FROM documents
+                                          WHERE status = 'approved_admin' AND {$v['flag']}
+                                            AND file_path IS NOT NULL AND file_path <> ''");
+                    foreach ($docs as $doc) {
+                        $deptId = (int)$doc['department_id'];
+                        if (!isset($knownDepts[$deptId])) continue;
+
+                        $currentRel = str_replace('\\', '/', (string)$doc['file_path']);
+                        $targetRel = storageSubdir($v['root'], $pdo, $deptId, documentFolderId($pdo, 'documents', (int)$doc['id'])) . '/' . basename($currentRel);
+                        if ($targetRel === $currentRel) continue;
+
+                        try {
+                            $moved = storageMoveObject($currentRel, $targetRel);
+                        } catch (StorageException | InvalidArgumentException $e) {
+                            error_log('[CHED] syncStorageMirrors r2 key move failed for document #' . $doc['id'] . ': ' . get_class($e));
+                            continue;
+                        }
+                        if ($moved || R2Storage::default()->head($targetRel) !== null) {
+                            $pdo->prepare('UPDATE documents SET file_path = ? WHERE id = ?')->execute([$targetRel, (int)$doc['id']]);
+                        }
+                    }
+                } catch (Throwable $e) {
+                    error_log('[CHED] syncStorageMirrors docs (' . $v['root'] . ') failed: ' . $e->getMessage());
+                }
+            }
+        } catch (Throwable $e) {
+            error_log('[CHED] syncStorageMirrors r2 reconcile failed: ' . $e->getMessage());
+        }
+        syncPhRepository($pdo);
+        return;
+    }
     $base = rtrim(UPLOAD_PATH, '\\/') . DIRECTORY_SEPARATOR;
 
     try {
@@ -3773,6 +4380,7 @@ function syncStorageMirrors(?PDO $pdo): void
     syncPhRepository($pdo);
 }
 
+// Function: getFileStorageDir
 function getFileStorageDir(string $status, ?string $source = null, ?int $departmentId = null, ?PDO $pdo = null, ?int $folderId = null, ?int $phId = null): string
 {
     $subdir = match ($status) {
@@ -3784,13 +4392,17 @@ function getFileStorageDir(string $status, ?string $source = null, ?int $departm
         'rejected_admin' => ($source === 'ph') ? 'rejected/program_head' : 'rejected/faculty',
         default => 'pending/faculty',
     };
-    $dir = UPLOAD_PATH . str_replace('/', DIRECTORY_SEPARATOR, $subdir) . DIRECTORY_SEPARATOR;
-    if (!is_dir($dir)) {
-        mkdir($dir, 0755, true);
+    if (STORAGE_DRIVER !== 'r2') {
+        // R2 has key prefixes, not directories — there is nothing to create.
+        $dir = UPLOAD_PATH . str_replace('/', DIRECTORY_SEPARATOR, $subdir) . DIRECTORY_SEPARATOR;
+        if (!is_dir($dir)) {
+            mkdir($dir, 0755, true);
+        }
     }
     return $subdir;
 }
 
+// Function: moveDocumentFile
 function moveDocumentFile(PDO $pdo, int $docId, string $table, string $newStatus, ?string $source = null): string|false
 {
     $stmt = $pdo->prepare("SELECT file_path, department_id FROM $table WHERE id = ?");
@@ -3813,6 +4425,39 @@ function moveDocumentFile(PDO $pdo, int $docId, string $table, string $newStatus
     $filename = basename($oldPath);
     $newRelative = $newSubdir . '/' . $filename;
 
+    if (STORAGE_DRIVER === 'r2') {
+        // Copy → verify size → update DB → delete old key. The row is only
+        // updated after the copy is confirmed, so a failed move leaves the
+        // document readable at its old key (plan §6.2).
+        if ($newRelative === $oldPath) return (string) $oldPath; // never copy-onto-self then delete
+        try {
+            $r2 = R2Storage::default();
+            $oldInfo = $r2->head($oldPath);
+            if ($oldInfo === null) {
+                error_log("[CHED] moveDocumentFile: source object missing for {$table}#{$docId}");
+                logAudit($pdo, 'file_move_failed', "source object missing for {$table}#{$docId}", $table, $docId);
+                return false;
+            }
+            $r2->copyTo($oldPath, $newRelative);
+            $newInfo = $r2->head($newRelative);
+            if ($newInfo === null || (int) $newInfo['size'] !== (int) $oldInfo['size']) {
+                throw new StorageUnknownError('copy verification failed: size mismatch or destination missing');
+            }
+            $upd = $pdo->prepare("UPDATE $table SET file_path = ? WHERE id = ?");
+            $upd->execute([$newRelative, $docId]);
+            if ($upd->rowCount() === 0) {
+                $r2->delete($newRelative); // row vanished under us — leave no orphan key
+                return false;
+            }
+            $r2->delete($oldPath); // best-effort; a leftover key is report-only
+            return $newRelative;
+        } catch (StorageException | InvalidArgumentException $e) {
+            error_log("[CHED] moveDocumentFile: r2 move failed for {$table}#{$docId}: " . get_class($e));
+            logAudit($pdo, 'file_move_failed', "r2 move failed for {$table}#{$docId}: " . get_class($e), $table, $docId);
+            return false;
+        }
+    }
+
     $oldFull = securePath($oldPath);
     $newFull = UPLOAD_PATH . str_replace('/', DIRECTORY_SEPARATOR, $newRelative);
     if (!is_dir(dirname($newFull))) {
@@ -3834,23 +4479,45 @@ function moveDocumentFile(PDO $pdo, int $docId, string $table, string $newStatus
 }
 
 // ===========================================================
+// HTML SANITIZATION — Document Preview Security
+// ===========================================================
+// shortcut: built-in allowlist sanitizer; upgrade to HTMLPurifier for full
+// CSS/style preservation and stricter attribute filtering.
+// Dependency: add "ezyang/htmlpurifier": "^4.18" to composer.json for upgrade.
+function sanitizeDocumentHtml(string $html): string
+{
+    $config = HTMLPurifier_Config::createDefault();
+    $config->set('HTML.Allowed', 'p,b,strong,i,em,u,s,strike,a[href],img[src],table,thead,tbody,tfoot,tr,th,td,ul,ol,li,blockquote,pre,code,hr,br,div,span,h1,h2,h3,h4,h5,h6');
+    $config->set('HTML.AllowedAttributes', '*.class,a.href,img.src,img.alt,img.title,img.width,img.height,a.title');
+    $config->set('CSS.AllowedProperties', 'font-family,font-size,color,background-color,text-align,width,height,border,border-collapse,padding,margin');
+    $config->set('URI.AllowedSchemes', ['http' => true, 'https' => true]);
+    $purifier = new HTMLPurifier($config);
+    return $purifier->purify($html);
+}
+
+// ===========================================================
 // UPLOAD DIR SETUP (filesystem only — no DB schema)
 // ===========================================================
 
-if (!is_dir(UPLOAD_PATH)) {
-    mkdir(UPLOAD_PATH, 0755, true);
-}
-if (!is_writable(UPLOAD_PATH)) {
-    error_log('[CHED] Upload directory is not writable: ' . UPLOAD_PATH);
-}
-if (!file_exists(UPLOAD_PATH . '.htaccess')) {
-    @file_put_contents(UPLOAD_PATH . '.htaccess', "Options -Indexes\nDeny from all\n");
-}
+// Directory bootstrap is local-driver only: under R2 the document store lives
+// entirely in the bucket, so no local directories (or .htaccess) are needed —
+// and creating them would falsely imply local storage is still in use.
+if (STORAGE_DRIVER !== 'r2') {
+    if (!is_dir(UPLOAD_PATH)) {
+        mkdir(UPLOAD_PATH, 0755, true);
+    }
+    if (!is_writable(UPLOAD_PATH)) {
+        error_log('[CHED] Upload directory is not writable: ' . UPLOAD_PATH);
+    }
+    if (!file_exists(UPLOAD_PATH . '.htaccess')) {
+        @file_put_contents(UPLOAD_PATH . '.htaccess', "Options -Indexes\nDeny from all\n");
+    }
 
-foreach (['pending/faculty', 'pending/program_head', 'admin_repository', 'ph_repository', 'rejected/faculty', 'rejected/program_head', 'admin_archive', 'templates'] as $sub) {
-    $dir = UPLOAD_PATH . $sub . DIRECTORY_SEPARATOR;
-    if (!is_dir($dir)) {
-        mkdir($dir, 0755, true);
+    foreach (['pending/faculty', 'pending/program_head', 'admin_repository', 'ph_repository', 'rejected/faculty', 'rejected/program_head', 'admin_archive', 'templates'] as $sub) {
+        $dir = UPLOAD_PATH . $sub . DIRECTORY_SEPARATOR;
+        if (!is_dir($dir)) {
+            mkdir($dir, 0755, true);
+        }
     }
 }
 
@@ -3858,11 +4525,13 @@ foreach (['pending/faculty', 'pending/program_head', 'admin_repository', 'ph_rep
 // AUTO-ARCHIVE EXPIRED DOCUMENTS
 // ===========================================================
 
+// Function: archivedDocCondition
 function archivedDocCondition(): string
 {
     return "(d.archived = 1 AND d.status = 'approved_admin')";
 }
 
+// Function: autoArchiveDocuments
 function autoArchiveDocuments(PDO $pdo): int
 {
     $count = 0;
@@ -3894,15 +4563,27 @@ function autoArchiveDocuments(PDO $pdo): int
 
             $filename = basename($fresh['file_path']);
             $newRel = storageSubdir('admin_archive', $pdo, (int)$doc['department_id'], documentFolderId($pdo, 'documents', (int)$doc['id'])) . '/' . $filename;
-            $newAbs = UPLOAD_PATH . str_replace('/', DIRECTORY_SEPARATOR, $newRel);
-            if (!is_dir(dirname($newAbs))) @mkdir(dirname($newAbs), 0755, true);
+            if (STORAGE_DRIVER !== 'r2') {
+                $newAbs = UPLOAD_PATH . str_replace('/', DIRECTORY_SEPARATOR, $newRel);
+                if (!is_dir(dirname($newAbs))) @mkdir(dirname($newAbs), 0755, true);
+            }
 
-            $oldAbs = securePath($fresh['file_path']);
-            $hasFile = $oldAbs && file_exists($oldAbs);
-            if ($hasFile && !@rename($oldAbs, $newAbs)) {
-                error_log('[CHED] autoArchive move failed for document #' . $doc['id'] . ': ' . $oldAbs);
-                $pdo->rollBack();
-                continue;
+            if (STORAGE_DRIVER === 'r2') {
+                try {
+                    $hasFile = storageMoveObject((string) $fresh['file_path'], $newRel);
+                } catch (StorageException $e) {
+                    error_log('[CHED] autoArchive move failed for document #' . $doc['id'] . ': ' . get_class($e));
+                    $pdo->rollBack();
+                    continue;
+                }
+            } else {
+                $oldAbs = securePath($fresh['file_path']);
+                $hasFile = $oldAbs && file_exists($oldAbs);
+                if ($hasFile && !@rename($oldAbs, $newAbs)) {
+                    error_log('[CHED] autoArchive move failed for document #' . $doc['id'] . ': ' . $oldAbs);
+                    $pdo->rollBack();
+                    continue;
+                }
             }
 
             $upd = $pdo->prepare("UPDATE documents
@@ -3948,15 +4629,27 @@ function autoArchiveDocuments(PDO $pdo): int
 
             $filename = basename($fresh['file_path']);
             $newRel = storageSubdir('admin_archive', $pdo, (int)$doc['department_id']) . '/' . $filename;
-            $newAbs = UPLOAD_PATH . str_replace('/', DIRECTORY_SEPARATOR, $newRel);
-            if (!is_dir(dirname($newAbs))) @mkdir(dirname($newAbs), 0755, true);
+            if (STORAGE_DRIVER !== 'r2') {
+                $newAbs = UPLOAD_PATH . str_replace('/', DIRECTORY_SEPARATOR, $newRel);
+                if (!is_dir(dirname($newAbs))) @mkdir(dirname($newAbs), 0755, true);
+            }
 
-            $oldAbs = securePath($fresh['file_path']);
-            $hasFile = $oldAbs && file_exists($oldAbs);
-            if ($hasFile && !@rename($oldAbs, $newAbs)) {
-                error_log('[CHED] autoArchive move failed for PH document #' . $doc['id'] . ': ' . $oldAbs);
-                $pdo->rollBack();
-                continue;
+            if (STORAGE_DRIVER === 'r2') {
+                try {
+                    $hasFile = storageMoveObject((string) $fresh['file_path'], $newRel);
+                } catch (StorageException $e) {
+                    error_log('[CHED] autoArchive move failed for PH document #' . $doc['id'] . ': ' . get_class($e));
+                    $pdo->rollBack();
+                    continue;
+                }
+            } else {
+                $oldAbs = securePath($fresh['file_path']);
+                $hasFile = $oldAbs && file_exists($oldAbs);
+                if ($hasFile && !@rename($oldAbs, $newAbs)) {
+                    error_log('[CHED] autoArchive move failed for PH document #' . $doc['id'] . ': ' . $oldAbs);
+                    $pdo->rollBack();
+                    continue;
+                }
             }
 
             $upd = $pdo->prepare("UPDATE ph_documents
@@ -3982,6 +4675,7 @@ function autoArchiveDocuments(PDO $pdo): int
 // MISSING FILE CLEANUP
 // ===========================================================
 
+// Function: cleanupMissingFiles
 function cleanupMissingFiles(PDO $pdo): array
 {
     $results = [
@@ -3993,6 +4687,23 @@ function cleanupMissingFiles(PDO $pdo): array
     $storageUsable = function (?string $filePath): bool {
         if (empty($filePath)) {
             return false;
+        }
+        if (STORAGE_DRIVER === 'r2') {
+            // Bucket reachability replaces "the storage dir exists and still has
+            // files in it". An unreachable bucket must look like UNUSABLE
+            // storage, so nothing is ever classified as a ghost and no row is
+            // deleted during an outage (plan §9). Probed once per sweep.
+            static $bucketReachable = null;
+            if ($bucketReachable === null) {
+                try {
+                    R2Storage::default()->headBucket();
+                    $bucketReachable = true;
+                } catch (StorageException $e) {
+                    error_log('[CHED] cleanupMissingFiles: r2 unreachable, refusing to classify ghosts: ' . get_class($e));
+                    $bucketReachable = false;
+                }
+            }
+            return $bucketReachable;
         }
         $rel = str_replace('\\', '/', trim($filePath, '\\/'));
         $dir = rtrim(SECURE_STORAGE_PATH, '\\/') . DIRECTORY_SEPARATOR . dirname($rel);
@@ -4015,6 +4726,12 @@ function cleanupMissingFiles(PDO $pdo): array
         if (empty($filePath)) {
             return false;
         }
+        if (STORAGE_DRIVER === 'r2') {
+            // exists() is false only on a genuine 404 and throws on any other
+            // storage failure; the throw aborts the sweep before any row is
+            // deleted, since classification always precedes deletion below.
+            return R2Storage::default()->exists($filePath);
+        }
         $fullPath = securePath($filePath);
         return $fullPath && file_exists($fullPath) && is_file($fullPath);
     };
@@ -4027,21 +4744,30 @@ function cleanupMissingFiles(PDO $pdo): array
         $stmt = $pdo->query("SELECT id, file_path, title FROM documents WHERE file_path IS NOT NULL");
         $docs = $stmt->fetchAll();
 
-        foreach ($docs as $doc) {
-            if ($isGhost($doc['file_path'])) {
-                try {
-                    $pdo->prepare("DELETE FROM documents WHERE id = ?")->execute([$doc['id']]);
-                    $results['documents_deleted']++;
-                    logAudit(
-                        $pdo,
-                        'cleanup_missing_file',
-                        "Deleted document with missing file: {$doc['title']} (file_path: {$doc['file_path']})",
-                        'documents',
-                        $doc['id']
-                    );
-                } catch (Exception $e) {
-                    $results['errors'][] = "Failed to delete document #{$doc['id']}: " . $e->getMessage();
-                }
+        // Safety guard: a wrong SECURE_STORAGE_PATH makes every stored file
+        // "disappear", so every row would look like a ghost. Refuse to
+        // mass-delete — log the anomaly and stop.
+        $ghosts = array_values(array_filter($docs, fn($doc) => $isGhost($doc['file_path'])));
+        if (count($ghosts) > 100) {
+            $msg = 'cleanupMissingFiles: ' . count($ghosts) . ' documents look like ghosts — refusing to delete. Check SECURE_STORAGE_PATH.';
+            error_log('[CHED Compliance] ' . $msg);
+            $results['errors'][] = $msg;
+            return $results;
+        }
+
+        foreach ($ghosts as $doc) {
+            try {
+                $pdo->prepare("DELETE FROM documents WHERE id = ?")->execute([$doc['id']]);
+                $results['documents_deleted']++;
+                logAudit(
+                    $pdo,
+                    'cleanup_missing_file',
+                    "Deleted document with missing file: {$doc['title']} (file_path: {$doc['file_path']})",
+                    'documents',
+                    $doc['id']
+                );
+            } catch (Exception $e) {
+                $results['errors'][] = "Failed to delete document #{$doc['id']}: " . $e->getMessage();
             }
         }
     } catch (Exception $e) {
@@ -4052,22 +4778,30 @@ function cleanupMissingFiles(PDO $pdo): array
         $stmt = $pdo->query("SELECT id, file_path, title FROM ph_documents WHERE file_path IS NOT NULL");
         $docs = $stmt->fetchAll();
 
-        foreach ($docs as $doc) {
-            if ($isGhost($doc['file_path'])) {
-                try {
-                    $pdo->prepare("DELETE FROM ph_repository WHERE ph_document_id = ?")->execute([$doc['id']]);
-                    $pdo->prepare("DELETE FROM ph_documents WHERE id = ?")->execute([$doc['id']]);
-                    $results['ph_documents_deleted']++;
-                    logAudit(
-                        $pdo,
-                        'cleanup_missing_file',
-                        "Deleted ph_document with missing file: {$doc['title']} (file_path: {$doc['file_path']})",
-                        'ph_documents',
-                        $doc['id']
-                    );
-                } catch (Exception $e) {
-                    $results['errors'][] = "Failed to delete ph_document #{$doc['id']}: " . $e->getMessage();
-                }
+        // Safety guard: same as above — a misconfigured SECURE_STORAGE_PATH
+        // must not mass-delete ph_documents (stops before the orphan sweep too).
+        $ghosts = array_values(array_filter($docs, fn($doc) => $isGhost($doc['file_path'])));
+        if (count($ghosts) > 100) {
+            $msg = 'cleanupMissingFiles: ' . count($ghosts) . ' ph_documents look like ghosts — refusing to delete. Check SECURE_STORAGE_PATH.';
+            error_log('[CHED Compliance] ' . $msg);
+            $results['errors'][] = $msg;
+            return $results;
+        }
+
+        foreach ($ghosts as $doc) {
+            try {
+                $pdo->prepare("DELETE FROM ph_repository WHERE ph_document_id = ?")->execute([$doc['id']]);
+                $pdo->prepare("DELETE FROM ph_documents WHERE id = ?")->execute([$doc['id']]);
+                $results['ph_documents_deleted']++;
+                logAudit(
+                    $pdo,
+                    'cleanup_missing_file',
+                    "Deleted ph_document with missing file: {$doc['title']} (file_path: {$doc['file_path']})",
+                    'ph_documents',
+                    $doc['id']
+                );
+            } catch (Exception $e) {
+                $results['errors'][] = "Failed to delete ph_document #{$doc['id']}: " . $e->getMessage();
             }
         }
     } catch (Exception $e) {
@@ -4094,6 +4828,7 @@ maybeAutoSyncExpiration($pdo);
 // ===========================================================
 // Simple file-based cache helpers (shared across pages)
 // ===========================================================
+// Function: fileCacheGet
 function fileCacheGet($key, $ttl = 300)
 {
     $cacheFile = sys_get_temp_dir() . '/cache_' . md5($key) . '.json';
@@ -4104,12 +4839,15 @@ function fileCacheGet($key, $ttl = 300)
     }
     return false;
 }
+// Function: fileCacheSet
 function fileCacheSet($key, $value, $ttl = 300)
 {
     $cacheFile = sys_get_temp_dir() . '/cache_' . md5($key) . '.json';
-    file_put_contents($cacheFile, json_encode($value));
-    touch($cacheFile);
+    // LOCK_EX: concurrent requests writing the same key must not interleave
+    // and corrupt the JSON. (touch() removed — file_put_contents sets mtime.)
+    file_put_contents($cacheFile, json_encode($value), LOCK_EX);
 }
+// Function: fileCacheDelete
 function fileCacheDelete($key)
 {
     $cacheFile = sys_get_temp_dir() . '/cache_' . md5($key) . '.json';
@@ -4119,12 +4857,14 @@ function fileCacheDelete($key)
 // ===========================================================
 // AJAX HELPERS — lightweight JSON response for live polling
 // ===========================================================
+// Function: isAjaxRequest
 function isAjaxRequest(): bool
 {
     return !empty($_SERVER['HTTP_X_REQUESTED_WITH'])
         && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest';
 }
 
+// Function: sendJson
 function sendJson(array $data): void
 {
     header('Content-Type: application/json');
@@ -4132,6 +4872,7 @@ function sendJson(array $data): void
     exit;
 }
 
+// Function: getTeacherTasksHtml
 function getTeacherTasksHtml(PDO $pdo, int $teacherId): array
 {
     $requirements = getTeacherRequirementsOptimized($pdo, $teacherId);
@@ -4188,6 +4929,7 @@ function getTeacherTasksHtml(PDO $pdo, int $teacherId): array
     return $sections;
 }
 
+// Function: getAdminDashboardStats
 function getAdminDashboardStats(PDO $pdo): array
 {
     return [

@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 define('CHED_APP', true);
 require_once 'config.php';
 requireDepartment();
@@ -37,7 +37,7 @@ function isRequirementComplete(array $req): bool
     return $directApproved > 0 && $directPending === 0 && $directRejected === 0;
 }
 
-function resolvePhReqState(?string $docStatus, $trId, bool $isComplete = false): array
+function resolvePhReqState(?string $docStatus, $trId, bool $isComplete = false, int $directRejected = 0, int $directPending = 0): array
 {
     // Admin sees this as "Complete" → PH sees it as "Approved".
     // Read-only from the PH side: no reassign, no personal upload.
@@ -79,6 +79,28 @@ function resolvePhReqState(?string $docStatus, $trId, bool $isComplete = false):
         ];
     }
     if ($docStatus === 'pending_admin') {
+        return [
+            'key' => 'pending_admin',
+            'label' => 'Pending Admin Review',
+            'class' => 'badge-pending-admin',
+            'can_unassign' => false,
+            'can_upload' => false,
+            'can_assign' => false,
+            'blocked' => true,
+        ];
+    }
+    if ($directRejected > 0) {
+        return [
+            'key' => 'rejected',
+            'label' => 'Rejected',
+            'class' => 'badge-rejected',
+            'can_unassign' => $assigned,
+            'can_upload' => true,
+            'can_assign' => !$assigned,
+            'blocked' => false,
+        ];
+    }
+    if ($directPending > 0 && $docStatus !== 'pending_program_head') {
         return [
             'key' => 'pending_admin',
             'label' => 'Pending Admin Review',
@@ -146,125 +168,6 @@ function getLatestReqDoc(PDO $pdo, int $deptId, string $category, string $docTyp
     return $row ?: null;
 }
 
-// AJAX handler for live polling
-if (isAjaxRequest() && isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'get_requirements') {
-    $deptIdAjax = (int)$_SESSION['department_id'];
-    $currentFolderIdAjax = isset($_GET['folder']) ? (int)$_GET['folder'] : null;
-
-    $reqSqlAjax = "
-        SELECT dr.*,
-               tr.id as tr_id,
-               tr.teacher_id,
-               tr.deadline,
-               u.name as teacher_name,
-               doc.status as current_status,
-               doc.id as doc_id,
-               doc.teacher_requirement_id as doc_tr_id,
-               doc.file_path,
-               (SELECT COUNT(DISTINCT id) FROM teacher_requirements WHERE requirement_id = dr.id) as total_assigned,
-               (SELECT COUNT(*) FROM documents d2
-                WHERE d2.department_id = dr.department_id
-                AND d2.category = dr.category
-                AND d2.document_type = dr.document_type
-                AND d2.status = 'approved_admin'
-                AND d2.teacher_requirement_id IS NULL
-                AND d2.archived = 0
-                AND (dr.cycle_started_at IS NULL OR d2.upload_date >= dr.cycle_started_at)) as direct_approved_count,
-               (SELECT COUNT(*) FROM documents d2
-                WHERE d2.department_id = dr.department_id
-                AND d2.category = dr.category
-                AND d2.document_type = dr.document_type
-                AND d2.status IN ('pending_program_head', 'pending_admin')
-                AND d2.teacher_requirement_id IS NULL
-                AND d2.archived = 0
-                AND (dr.cycle_started_at IS NULL OR d2.upload_date >= dr.cycle_started_at)) as direct_pending_count,
-               (SELECT COUNT(*) FROM documents d2
-                WHERE d2.department_id = dr.department_id
-                AND d2.category = dr.category
-                AND d2.document_type = dr.document_type
-                AND d2.status IN ('rejected_program_head', 'rejected_admin')
-                AND d2.teacher_requirement_id IS NULL
-                AND d2.archived = 0
-                AND (dr.cycle_started_at IS NULL OR d2.upload_date >= dr.cycle_started_at)) as direct_rejected_count,
-               (SELECT GROUP_CONCAT(latest.status) FROM (
-                   SELECT d3.status, d3.teacher_requirement_id, d3.upload_date
-                   FROM documents d3
-                   INNER JOIN (
-                       SELECT teacher_requirement_id, MAX(version) AS max_ver
-                       FROM documents
-                       WHERE teacher_requirement_id IS NOT NULL
-                       GROUP BY teacher_requirement_id
-                   ) lm ON d3.teacher_requirement_id = lm.teacher_requirement_id AND d3.version = lm.max_ver
-               ) latest
-               WHERE latest.teacher_requirement_id IN (SELECT tr2.id FROM teacher_requirements tr2 WHERE tr2.requirement_id = dr.id)
-                 AND (dr.cycle_started_at IS NULL OR latest.upload_date >= dr.cycle_started_at)) as latest_statuses
-        FROM department_requirements dr
-        LEFT JOIN teacher_requirements tr ON dr.id = tr.requirement_id
-        LEFT JOIN users u ON tr.teacher_id = u.id
-        LEFT JOIN documents doc ON doc.id = (
-            SELECT d2.id FROM documents d2
-            WHERE d2.department_id = dr.department_id
-              AND d2.category = dr.category
-              AND d2.document_type = dr.document_type
-              AND d2.file_path IS NOT NULL AND d2.file_path != ''
-              AND d2.archived = 0
-            ORDER BY d2.version DESC, d2.id DESC
-            LIMIT 1
-        )
-        WHERE dr.department_id = ? AND " . ($currentFolderIdAjax ? 'dr.folder_id = ?' : '(dr.folder_id IS NULL OR dr.folder_id = 0)') . "
-        ORDER BY dr.category, dr.document_type
-    ";
-    $reqParamsAjax = [$deptIdAjax];
-    if ($currentFolderIdAjax) $reqParamsAjax[] = $currentFolderIdAjax;
-    $reqStmtAjax = $pdo->prepare($reqSqlAjax);
-    $reqStmtAjax->execute($reqParamsAjax);
-    $requirementsAjax = $reqStmtAjax->fetchAll();
-
-    $itemsAjax = [];
-    foreach ($requirementsAjax as $r) {
-        $isComplete = isRequirementComplete($r);
-        $state = resolvePhReqState($r['current_status'] ?? null, $r['tr_id'] ?? null, $isComplete);
-        $expired = $r['expiration_date'] && strtotime($r['expiration_date']) < time();
-        // Hide Manage when no actions are available (pending review / approved / complete).
-        $showManageBtn = !$state['blocked'];
-
-        $itemsAjax[] = [
-            'id'               => (int)$r['id'],
-            'category'         => $r['category'],
-            'document_type'    => $r['document_type'],
-            'mandatory'        => (bool)$r['mandatory'],
-            'expiration_date'  => $r['expiration_date'],
-            'expired'          => $expired,
-            'tr_id'            => $r['tr_id'],
-            'teacher_name'     => $r['teacher_name'],
-            'current_status'   => $r['current_status'],
-            'doc_id'           => $r['doc_id'],
-            'status_label'     => $state['label'],
-            'status_class'     => $state['class'],
-            'state'            => $state['key'],
-            'is_assigned'      => !empty($r['tr_id']),
-            'is_teacher_rejected' => !empty($r['tr_id']) && $state['key'] === 'rejected',
-            'is_rejected'      => $state['key'] === 'rejected',
-            'can_unassign'     => $state['can_unassign'],
-            'can_upload'       => $state['can_upload'],
-            'can_assign'       => $state['can_assign'],
-            'show_manage'      => $showManageBtn,
-            'description'      => $r['description'] ?? '',
-        ];
-    }
-
-    $statsAjax = ['approved' => 0, 'pending' => 0, 'rejected' => 0, 'not_uploaded' => 0];
-    foreach ($requirementsAjax as $r) {
-        if (isRequirementComplete($r)) { $statsAjax['approved']++; continue; }
-        $st = $r['current_status'] ?? null;
-        if ($st === 'approved_admin' || $st === 'approved_program_head') $statsAjax['approved']++;
-        elseif (in_array($st, ['pending_program_head', 'pending_admin'])) $statsAjax['pending']++;
-        elseif (in_array($st, ['rejected_program_head', 'rejected_admin'])) $statsAjax['rejected']++;
-        else $statsAjax['not_uploaded']++;
-    }
-
-    sendJson(['success' => true, 'items' => $itemsAjax, 'stats' => $statsAjax]);
-}
 
 // ============================================================================
 // HELPER FUNCTIONS
@@ -1420,7 +1323,7 @@ include 'includes/header.php';
                                             $req = $item;
                                             // Aggregate "Complete" check → shows as "Approved" for the PH
                                             $isComplete = isRequirementComplete($req);
-                                            $state = resolvePhReqState($req['current_status'] ?? null, $req['tr_id'] ?? null, $isComplete);
+                                            $state = resolvePhReqState($req['current_status'] ?? null, $req['tr_id'] ?? null, $isComplete, (int)($req['direct_rejected_count'] ?? 0), (int)($req['direct_pending_count'] ?? 0));
                                             $sl = [$state['label'], $state['class']];
                                             $expired = $req['expiration_date'] && strtotime($req['expiration_date']) < time();
                                             $isAssigned = !empty($req['tr_id']);
@@ -1540,7 +1443,7 @@ include 'includes/header.php';
                     <div class="form-group">
                         <label>File</label>
                         <input type="file" name="document_file" class="form-control"
-                               accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.gif,.webp,.xls,.xlsx" required>
+                               accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.gif,.webp,.xls,.xlsx,.ppt,.pptx" required>
                     </div>
                     <div class="form-group">
                         <label>Comment </label>
@@ -1878,119 +1781,8 @@ include 'includes/header.php';
 </script>
 
 <script nonce="<?= csp_nonce() ?>">
-(function() {
-    const POLL_INTERVAL = 1000;
-    let pollTimer = null;
-
-    function escHtml(s) {
-        const d = document.createElement('div');
-        d.appendChild(document.createTextNode(s || ''));
-        return d.innerHTML;
-    }
-
-    function renderRow(item) {
-        const expiredBadge = item.expired
-            ? '<span class="badge badge-rejected" style="margin-left:0.5rem;">Expired</span>'
-            : '';
-        const dateHtml = item.expiration_date
-            ? '<span class="' + (item.expired ? 'text-danger' : '') + '">'
-              + new Date(item.expiration_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-              + '</span>' + expiredBadge
-            : '—';
-        const mandatoryBadge = item.mandatory
-            ? '<span class="badge badge-required">Required</span>'
-            : '<span class="badge badge-optional">Optional</span>';
-        const hasDesc = (item.description || '').trim() !== '';
-        const descBtn = hasDesc
-            ? '<button type="button" class="btn btn-sm btn-secondary desc-btn" data-name="' + escHtml(item.category + ' - ' + item.document_type) + '" data-desc="' + escHtml(item.description) + '">Description</button>'
-            : '';
-        const manageBtn = item.show_manage
-            ? '<button class="btn btn-sm btn-primary action-btn" data-id="' + item.id + '" data-name="' + escHtml(item.category + ' - ' + item.document_type) + '" data-state="' + escHtml(item.state || '') + '" data-assigned="' + (item.is_assigned ? '1' : '0') + '" data-trid="' + (item.tr_id || '') + '" data-can-unassign="' + (item.can_unassign ? '1' : '0') + '" data-can-upload="' + (item.can_upload ? '1' : '0') + '" data-can-assign="' + (item.can_assign ? '1' : '0') + '" data-rejected="' + (item.is_rejected ? '1' : '0') + '">Manage</button>'
-            : '';
-        const viewBtn = item.doc_id
-            ? '<button class="btn btn-sm btn-secondary view-btn" data-id="' + item.doc_id + '" data-type="document" data-title="' + escHtml(item.category + ' - ' + item.document_type) + '" style="cursor:pointer;">View</button>'
-            : '';
-
-        return '<tr data-row-id="requirement:' + item.id + '">'
-            + '<td><div><strong class="req-category">' + escHtml(item.category) + '</strong><span class="req-doc">' + escHtml(item.document_type) + '</span></div></td>'
-            + '<td>' + mandatoryBadge + '</td>'
-            + '<td>' + dateHtml + '</td>'
-            + '<td><span class="badge ' + item.status_class + '">' + escHtml(item.status_label) + '</span></td>'
-            + '<td><div class="btn-group">' + manageBtn + descBtn + viewBtn + '</div></td>'
-            + '</tr>';
-    }
-
-    function pollRequirements() {
-        fetch(window.location.href, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Requested-With': 'XMLHttpRequest' },
-            body: 'ajax_action=get_requirements'
-        })
-        .then(function(r) { return r.json(); })
-        .then(function(data) {
-            if (!data.success) return;
-
-            var items = data.items;
-            var stats = data.stats;
-
-            // Update stats display (all four counters)
-            document.querySelectorAll('.stat-value[data-stat]').forEach(function(el) {
-                var key = el.dataset.stat;
-                if (stats[key] !== undefined) el.textContent = stats[key];
-            });
-
-            var tbody = document.querySelector('.data-table tbody');
-            var tableWrap = document.querySelector('.table-responsive');
-            var emptyState = document.querySelector('.empty-state');
-
-            if (items.length === 0) {
-                if (tableWrap) {
-                    tableWrap.outerHTML = '<div class="empty-state">'
-                        + '<div class="empty-state-icon"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></div>'
-                        + '<p>This folder is empty.</p></div>';
-                }
-                return;
-            }
-
-            if (emptyState && !tableWrap) {
-                location.reload();
-                return;
-            }
-
-            var html = '';
-            items.forEach(function(item) {
-                html += renderRow(item);
-            });
-
-            if (tbody) {
-                tbody.innerHTML = html;
-                rebindActions();
-            }
-        })
-        .catch(function() {});
-    }
-
-    function rebindActions() {
-        document.querySelectorAll('.action-btn').forEach(function(btn) {
-            btn.addEventListener('click', function() {
-                if (typeof openManageModal === 'function') {
-                    openManageModal(this);
-                }
-            });
-        });
-        document.querySelectorAll('.desc-btn').forEach(function(btn) {
-            btn.addEventListener('click', function() {
-                document.getElementById('descReqName').textContent = btn.dataset.name || '';
-                document.getElementById('descBody').textContent = btn.dataset.desc || '';
-                const m = document.getElementById('descModal');
-                m.classList.add('show');
-                m.style.display = 'flex';
-            });
-        });
-    }
-
-    pollTimer = setInterval(pollRequirements, POLL_INTERVAL);
-})();
+    // ponytail: full-page reload instead of 1s AJAX poll (single server-rendered query, nothing to drift); skips reload when a modal is open, 30s interval
+    setInterval(function () { if (!document.querySelector(".modal.show")) location.reload(); }, 30000);
 </script>
 
 <?php include 'includes/footer.php'; ?>

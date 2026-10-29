@@ -3,10 +3,6 @@ if (realpath($_SERVER['SCRIPT_FILENAME'] ?? '') === __FILE__) {
     http_response_code(403);
     exit('Forbidden');
 }
-/**
- * Avatar / photo upload helpers.
- * Shared by includes/header.php and admin_settings.php
- */
 
 if (!defined('CHED_APP')) {
     exit;
@@ -30,10 +26,6 @@ if (!defined('AVATAR_ALLOWED_MIME')) {
     ]);
 }
 
-/**
- * Detect (once) whether users.avatar exists. Returns false instead of throwing,
- * so the app keeps working before the migration is applied.
- */
 if (!function_exists('usersHasAvatarColumn')) {
     function usersHasAvatarColumn(PDO $pdo): bool
     {
@@ -67,10 +59,7 @@ if (!function_exists('usersHasAvatarColumn')) {
     }
 }
 
-/**
- * SQL fragment to safely select the avatar column whether or not it exists.
- * Usage: "SELECT id, name, " . userAvatarColumnExpr($pdo) . " AS avatar FROM users"
- */
+
 if (!function_exists('userAvatarColumnExpr')) {
     function userAvatarColumnExpr(PDO $pdo): string
     {
@@ -78,9 +67,6 @@ if (!function_exists('userAvatarColumnExpr')) {
     }
 }
 
-/**
- * Create the upload directory (and harden it for Apache) if needed.
- */
 if (!function_exists('avatarEnsureDir')) {
     function avatarEnsureDir(): bool
     {
@@ -106,10 +92,7 @@ if (!function_exists('avatarEnsureDir')) {
     }
 }
 
-/**
- * Public URL for a stored avatar path, with a cache-busting query string.
- * Returns null when the file is missing or the path is outside the uploads dir.
- */
+
 if (!function_exists('avatarUrl')) {
     function avatarUrl(?string $path): ?string
     {
@@ -132,9 +115,7 @@ if (!function_exists('avatarUrl')) {
     }
 }
 
-/**
- * Delete a stored avatar file (never leaves the avatars directory).
- */
+
 if (!function_exists('avatarDelete')) {
     function avatarDelete(?string $path): void
     {
@@ -218,8 +199,7 @@ if (!function_exists('avatarUpload')) {
 
         $ext = $allowed[$mime];
 
-        // File is named after the uploader: "<Name>_<uid>.<ext>".
-        // The uid keeps two users with the same name from sharing one file.
+
         $safeName = preg_replace('/[^A-Za-z0-9_\-]/', '', (string) $name);
         if (!$safeName) {
             $safeName = 'avatar';

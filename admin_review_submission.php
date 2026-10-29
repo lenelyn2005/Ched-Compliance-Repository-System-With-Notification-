@@ -29,6 +29,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $current_user_id = $_SESSION['user_id'];
     $current_time = date('Y-m-d H:i:s');
 
+    // Pre-check R2 storage before any DB transaction. A missing or broken
+    // storage configuration must fail fast and never leave an inconsistent
+    // approval state (plan §9, §6.2).
+    try {
+        $r2 = R2Storage::default();
+    } catch (StorageException $e) {
+        error_log('[CHED] admin review blocked by storage config: ' . $e->getMessage());
+        header('Location: ' . $redirect . '?error=' . urlencode('Storage unavailable. Please verify R2 environment configuration.'));
+        exit;
+    }
+
     try {
         $pdo->beginTransaction();
 
@@ -44,10 +55,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 exit;
             }
 
-            // Check if file exists
+            // Check if file exists. A submission row is deleted ONLY when
+            // storage confirms the file is genuinely gone; an outage, bad
+            // credential or throttle must never delete data (plan §9).
             $filePath = $document['file_path'] ?? null;
-            $fullPath = !empty($filePath) ? securePath($filePath) : null;
-            if (empty($filePath) || $fullPath === false || !file_exists($fullPath) || !is_file($fullPath)) {
+            try {
+                $fileGone = empty($filePath) || !storageObjectExists((string) $filePath);
+            } catch (StorageException $e) {
+                $pdo->rollBack();
+                error_log('[CHED] admin review blocked, storage unavailable: ' . get_class($e));
+                header('Location: ' . $redirect . '?error=' . urlencode('Storage temporarily unavailable. Please try again.'));
+                exit;
+            }
+            if ($fileGone) {
                 // Delete the record since file is missing
                 $pdo->prepare("DELETE FROM ph_documents WHERE id = ?")->execute([$submissionId]);
                 logAudit($pdo, 'cleanup_missing_file', "Deleted ph_document with missing file during review: {$document['title']}", 'ph_documents', $submissionId);
@@ -115,10 +135,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 exit;
             }
 
-            // Check if file exists
+            // Check if file exists — only genuine absence may delete the row
+            // (plan §9).
             $filePath = $document['file_path'] ?? null;
-            $fullPath = !empty($filePath) ? securePath($filePath) : null;
-            if (empty($filePath) || $fullPath === false || !file_exists($fullPath) || !is_file($fullPath)) {
+            try {
+                $fileGone = empty($filePath) || !storageObjectExists((string) $filePath);
+            } catch (StorageException $e) {
+                $pdo->rollBack();
+                error_log('[CHED] admin review blocked, storage unavailable: ' . get_class($e));
+                header('Location: ' . $redirect . '?error=' . urlencode('Storage temporarily unavailable. Please try again.'));
+                exit;
+            }
+            if ($fileGone) {
                 // Delete the record since file is missing
                 $pdo->prepare("DELETE FROM documents WHERE id = ?")->execute([$submissionId]);
                 logAudit($pdo, 'cleanup_missing_file', "Deleted document with missing file during review: {$document['title']}", 'documents', $submissionId);

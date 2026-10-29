@@ -22,10 +22,6 @@ if (!defined('CHED_APP')) exit;
 <?php if (isset($extraScripts)) echo $extraScripts; ?>
 
 
-<!-- ═══════════════════════════════════════════════════════════════
-     SECTION 3 · DOCUMENT VIEWER — HTML
-     Single global modal reused for every preview trigger.
-     ═══════════════════════════════════════════════════════════════ -->
 
 <!-- ── 3.1  MODAL SHELL ─────────────────────────────────────── -->
 <div id="universalDocumentModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="docViewerTitle">
@@ -120,7 +116,7 @@ if (!defined('CHED_APP')) exit;
       <!-- 3.4.a  Loading -->
       <div id="docLoading" class="doc-loading">
         <div class="doc-loading-spinner"></div>
-        <div class="doc-loading-text">Loading document…</div>
+        <div class="doc-loading-text">Opening…</div>
       </div>
 
       <!-- 3.4.b  PDF canvas -->
@@ -168,10 +164,6 @@ if (!defined('CHED_APP')) exit;
   </div>
 </div>
 
-
-<!-- ═══════════════════════════════════════════════════════════════
-     SECTION 4 · DOCUMENT VIEWER — STYLES (pure vanilla CSS)
-     ═══════════════════════════════════════════════════════════════ -->
 <style>
 /* ── 4.1  THEME TOKENS (change colors here) ──────────────────── */
 #universalDocumentModal{
@@ -284,9 +276,9 @@ if (!defined('CHED_APP')) exit;
 /* ── 4.6  LOADING SPINNER ───────────────────────────────────── */
 .doc-loading{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#fff;
   text-align:center;z-index:5;pointer-events:none}
-.doc-loading-spinner{width:46px;height:46px;margin:0 auto 14px;
-  border:3px solid rgba(255,255,255,.12);border-top-color:#60a5fa;border-radius:50%;
-  animation:docSpin .75s linear infinite;box-shadow:0 0 24px rgba(96,165,250,.25)}
+.doc-loading-spinner{width:24px;height:24px;margin:0 auto 8px;
+  border:2px solid rgba(255,255,255,.12);border-top-color:#60a5fa;border-radius:50%;
+  animation:docSpin .5s linear infinite;box-shadow:0 0 12px rgba(96,165,250,.15)}
 @keyframes docSpin{to{transform:rotate(360deg)}}
 .doc-loading-text{font-size:.8rem;font-weight:500;letter-spacing:.02em;color:rgba(255,255,255,.7)}
 
@@ -631,7 +623,7 @@ document.addEventListener('DOMContentLoaded', function () {
   /* ── 5.8  TYPE DETECTION & DISPATCHER ──────────────────────── */
   function detectAndOpen(docId, title, source, downloadUrl, extension, previewUrl){
     const expectedDocId = docId;
-    const knownExts = ['pdf','jpg','jpeg','png','gif','webp','doc','docx','xls','xlsx'];
+    const knownExts = ['pdf','jpg','jpeg','png','gif','webp','doc','docx','xls','xlsx','ppt','pptx'];
     if (extension && knownExts.indexOf(extension) !== -1) {
       handleByExtension(extension, previewUrl, downloadUrl, expectedDocId);
       return;
@@ -657,6 +649,16 @@ document.addEventListener('DOMContentLoaded', function () {
 
     // ── PDF ────────────────────────────────────────────────────
     if (type === 'pdf') {
+      if (currentDocId !== expectedDocId) return;
+      toolbar.classList.add('active');
+      pdfToolbar.classList.add('active');
+      loadPDF(url, expectedDocId);
+      return;
+    }
+
+    // ── PowerPoint (returns PDF via preview.php) ────────────────
+    if (type === 'ppt' || type === 'pptx') {
+      type = 'pdf';
       if (currentDocId !== expectedDocId) return;
       toolbar.classList.add('active');
       pdfToolbar.classList.add('active');
@@ -747,13 +749,13 @@ document.addEventListener('DOMContentLoaded', function () {
     currentDocId = docId;
     titleEl.textContent = title || 'Document Preview';
     if (subtitleEl) {
-      subtitleEl.textContent = extension ? (extension.toUpperCase() + ' document') : 'Loading preview…';
+      subtitleEl.textContent = extension ? (extension.toUpperCase() + ' document') : 'Document';
     }
     modal.classList.add('show');
     openFocus();
 
     const previewUrl  = 'preview.php?id=' + encodeURIComponent(docId) + '&source=' + encodeURIComponent(source);
-    const downloadUrl = previewUrl + '&download=1';
+    const downloadUrl = 'download_document.php?id=' + encodeURIComponent(docId) + '&source=' + encodeURIComponent(source);
     downloadBtn.href = downloadUrl;
 
     detectAndOpen(docId, title, source, downloadUrl, extension, previewUrl);
@@ -864,7 +866,7 @@ document.addEventListener('DOMContentLoaded', function () {
     if (!row) {
       var p = h.split(':');
       var b = document.querySelector('.view-btn[data-id="' + p[1] + '"][data-type="' + p[0] + '"]');
-      if (b) row = b.closest('.content-item');
+      if (b) row = b.closest('.content-item, .file-card, .folder-item-card');
     }
     return row;
   }

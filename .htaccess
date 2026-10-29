@@ -3,6 +3,8 @@
     Require all denied
 </FilesMatch>
 
+
+
 # Never serve schema dumps, internal reports/notes, tooling sources or backups
 <FilesMatch "\.(sql|md|ps1|lock|bak|log|dist|sample)$">
     Require all denied

@@ -12,21 +12,31 @@ $error  = '';
 $success = '';
 
 $phSlug = phRootSlug($pdo, $phId) ?: ('ph_' . $phId);
-$phUploadDir = UPLOAD_PATH . 'templates' . DIRECTORY_SEPARATOR . $phSlug . DIRECTORY_SEPARATOR;
-if (!is_dir($phUploadDir)) {
-    mkdir($phUploadDir, 0755, true);
-}
+// No template directory is created up front: allocateStorageFilename() creates
+// it on local when a file is actually stored, and under R2 there is none.
 
 // Delete a requirement template by its DB file_path (never by the
 // original uploaded name — physical storage names are system-generated).
-// Returns false when the file still exists after the unlink attempt, so callers
+// Returns false when the file still exists after the delete attempt, so callers
 // can report the orphan instead of failing silently (C-5).
 function deleteRequirementFile(?string $relativePath): bool {
     global $phSlug;
     if (!$relativePath) return true;
-    $path = (strpos($relativePath, '/') !== false || strpos($relativePath, '\\') !== false)
-        ? securePath($relativePath)
-        : securePath('templates/' . $phSlug . '/' . $relativePath);
+    $rel = (strpos($relativePath, '/') !== false || strpos($relativePath, '\\') !== false)
+        ? str_replace('\\', '/', $relativePath)
+        : 'templates/' . $phSlug . '/' . $relativePath;
+    if (STORAGE_DRIVER === 'r2') {
+        // delete() treats a genuine 404 as success, mirroring "file already
+        // gone" below; only a real failure returns false and reports an orphan.
+        try {
+            R2Storage::default()->delete($rel);
+            return true;
+        } catch (StorageException | InvalidArgumentException $e) {
+            error_log('[CHED] r2 requirement-template delete failed: ' . get_class($e));
+            return false;
+        }
+    }
+    $path = securePath($rel);
     if ($path && is_file($path)) {
         return unlink($path);
     }
@@ -68,14 +78,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 }
             }
             if (empty($error)) {
-                // The file was already moved; remove it if no row gets written (no
+                // The file was already stored; remove it if no row gets written (no
                 // committed row can reference it at this point).
-                $movedFullPath = $filePath !== null ? $phUploadDir . $uniqueFilename : null;
                 try {
                     $stmt = $pdo->prepare("INSERT INTO ph_requirements (department_id, created_by, title, description, filename, file_path, created_at, deadline) VALUES (?, ?, ?, ?, ?, ?, NOW(), ?)");
                     $stmt->execute([$deptBind, $phId, $reqTitle, $reqDesc, $originalFilename, $filePath, $reqDeadline]);
                 } catch (Throwable $e) {
-                    if ($movedFullPath !== null) @unlink($movedFullPath);
+                    if ($filePath !== null) storageDeleteRel($filePath);
                     $error = 'Could not save the requirement. Please try again.';
                 }
                 if (empty($error)) {
@@ -113,8 +122,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             // metadata column tracks the uploaded file's display name.
             $filename = $old['filename'];
             $filePath = $old['file_path'];
-            $replacedOldPath = null; // set only when a replacement file was moved into place
-            $newFull = null;
+            $replacedOldPath = null; // set only when a replacement file was stored
+            $newStored = false;
             if (!empty($_FILES['req_file']['name'])) {
                 $file = $_FILES['req_file'];
                 // Full 7-layer pipeline from config.php (see create_requirement
@@ -127,7 +136,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                     $filename = $file['name'];
                     $filePath = 'templates/' . $phSlug . '/' . $stored['filename'];
                     $replacedOldPath = $old['file_path'];
-                    $newFull = $phUploadDir . $stored['filename'];
+                    $newStored = true;
                 }
             }
             if (empty($error)) {
@@ -136,7 +145,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                         ->execute([$reqTitle, $reqDesc, $filename, $filePath, $reqDeadline, $reqId]);
                 } catch (Throwable $e) {
                     // Row never moved off the old path, so the new file is unreferenced.
-                    if ($newFull !== null) @unlink($newFull);
+                    if ($newStored) storageDeleteRel($filePath);
                     $error = 'Could not save the requirement. Please try again.';
                 }
                 if (empty($error)) {

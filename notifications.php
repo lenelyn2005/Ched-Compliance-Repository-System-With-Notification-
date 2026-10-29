@@ -70,7 +70,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mark_all_read'])) {
 }
 $csrfToken = getCsrfToken();
 
-deleteInvalidNotifications($pdo, $userId);
+// shortcut: invalid rows are filtered by fetchValidNotifications SQL and cleaned via the clean_invalid POST action only
 $notifications = fetchValidNotifications($pdo, $userId);
 
 $typeStyles = [
@@ -608,7 +608,7 @@ include 'includes/header.php';
                     </div>
                     <h3>Your notification tray is empty</h3>
                     <p>Any updates regarding document reviews or task assignments will appear here.</p>
-                    <a href="<?= $role === 'admin' ? 'admin_dashboard.php' : (in_array($role, ['department', 'unit_head'], true) ? 'program_head_dashboard.php' : 'teacher_dashboard.php') ?>"
+                    <a href="<?= $role === 'admin' ? 'admin_dashboard.php' : (in_array($role, ['department', 'unit_head'], true) ? 'program_head_dashboard.php' : ($role === 'super_admin' ? 'super_admin_dashboard.php' : 'teacher_dashboard.php')) ?>"
                         class="btn btn-primary">Back to Dashboard</a>
                 </div>
             <?php else: ?>
@@ -861,8 +861,8 @@ include 'includes/header.php';
                 }
             });
 
-            // Poll every 1s; source of truth for the history list (no WebSocket dependency)
-            setInterval(fetchNewNotifications, 1000);
+            // shortcut: notification history polling removed; WebSocket handles real-time updates.
+            // Existing page load and manual refresh preserved.
         });
     </script>
 

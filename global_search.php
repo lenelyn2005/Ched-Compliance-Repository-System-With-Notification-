@@ -1,15 +1,5 @@
 <?php
-/**
- * Command-palette search for every role.
- *
- * One endpoint, one auth check, one response contract:
- *   {"groups":[{"label":"...","items":[{"title":"...","hint":"...","url":"..."}]}]}
- *
- * The role is read from the DB, never the session: a stale session must not keep
- * serving results after an account is demoted, and the role is the only thing that
- * decides which scope below runs. The three branches are mutually exclusive, so
- * exactly one set of queries executes per request.
- */
+
 define('CHED_APP', true);
 require_once 'config.php';
 
@@ -38,8 +28,6 @@ $like = '%' . addcslashes($q, '%_\\') . '%';
 
 switch ($role) {
 
-    // ---------------------------------------------------------------- admin --
-    // Approved documents (repository vs archive) and program head accounts.
     case 'admin':
         $docs = $pdo->prepare(
             "SELECT d.id, d.title, d.archived, d.department_id, dep.department_name,
@@ -117,7 +105,7 @@ switch ($role) {
             $headItems[] = [
                 'title' => (string) $u['name'],
                 'hint'  => (string) $u['email'],
-                'url'   => 'admin_manage_users.php?edit=' . (int) $u['id'],
+                'url'   => 'admin_manage_users.php?edit=' . (int) $u['id'] . '&highlight=user:' . (int) $u['id'],
             ];
         }
 
@@ -207,9 +195,6 @@ switch ($role) {
         );
         $teachers->execute([$deptId, $like, $like]);
 
-        /* A folder row only exists in its PARENT's listing, so folder hits link to the
-           parent. Root listings are reached by omitting ?folder= (folder=0 would filter
-           on id 0 and miss the NULL-parent rows the page actually shows). */
         $repoItems = [];
         foreach ($repoFolders->fetchAll() as $f) {
             $parent = (int) ($f['parent_folder_id'] ?? 0);

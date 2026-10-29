@@ -49,6 +49,11 @@ function csp_enforced(): bool
 function csp_directives(): array
 {
     $nonce = csp_nonce();
+    $wsHost = getenv('WS_HOST') ?: 'localhost';
+    $wsPort = (getenv('WS_PORT') ?: '8080');
+    // shortcut: allows both schemes for configured endpoint; upgrade when endpoint is HTTPS-only.
+    $wsDev = 'ws://' . $wsHost . ':' . $wsPort;
+    $wsProd = 'wss://' . $wsHost . ':' . $wsPort;
     return [
         "default-src 'self'",
         "script-src 'self' 'nonce-$nonce' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net",
@@ -56,7 +61,7 @@ function csp_directives(): array
         "font-src 'self' data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://fonts.gstatic.com",
         "img-src 'self' data: blob:",
         "worker-src 'self' blob: https://cdnjs.cloudflare.com",
-        "connect-src 'self' https://cdn.jsdelivr.net",
+        "connect-src 'self' https://cdn.jsdelivr.net $wsDev $wsProd",
         "object-src 'none'",
         "base-uri 'self'",
         "form-action 'self'",

@@ -3,15 +3,10 @@ define('CHED_APP', true);
 require_once 'config.php';
 requireAdmin();
 
-// Make sure every department has its archive folder
 ensureDepartmentFolders($pdo, ['admin_archive']);
-
-// Auto-archive expired approved documents
 autoArchiveDocuments($pdo);
 
-// -------------------------------------------------------------------------
-// Helper: Get folder path segments [id, name] from root to the folder ID
-// -------------------------------------------------------------------------
+
 function getFolderPathSegments($pdo, $folderId)
 {
     $segments = [];
@@ -64,6 +59,32 @@ function getDepartmentArchiveStats($pdo, $deptId)
     ];
 }
 
+// shortcut: uses existing archive query logic (respects archive/visibility rules); upgrade to a single count query for larger trees.
+function archiveFolderFileCount($pdo, int $deptId, int $folderId): int
+{
+    $folderCondition = ($folderId == 0)
+        ? "(COALESCE(dr.folder_id, dr2.folder_id) IS NULL OR COALESCE(dr.folder_id, dr2.folder_id) = 0)"
+        : "COALESCE(dr.folder_id, dr2.folder_id) = ?";
+    $params = [$deptId];
+    if ($folderId != 0) $params[] = $folderId;
+
+    $sql = "
+        SELECT COUNT(DISTINCT d.id)
+        FROM documents d
+        JOIN departments dep ON d.department_id = dep.id
+        LEFT JOIN teacher_requirements tr ON d.teacher_requirement_id = tr.id
+        LEFT JOIN department_requirements dr ON tr.requirement_id = dr.id
+        LEFT JOIN department_requirements dr2 ON d.teacher_requirement_id IS NULL AND dr2.department_id = d.department_id AND dr2.category = d.category AND dr2.document_type = d.document_type
+        WHERE d.department_id = ?
+          AND d.archived = 1
+          AND d.status = 'approved_admin'
+          AND $folderCondition
+    ";
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+    return (int) $stmt->fetchColumn();
+}
+
 // -------------------------------------------------------------------------
 // Process GET parameters
 // -------------------------------------------------------------------------
@@ -100,11 +121,26 @@ if ($deleteId !== null) {
         $stmt->execute([$deleteId]);
         $doc = $stmt->fetch();
         if ($doc) {
-            $filePath = securePath($doc['file_path']);
-            if ($filePath && file_exists($filePath) && !@unlink($filePath)) {
-                error_log('[CHED] archive delete: unlink failed for ph_documents #' . $deleteId . ': ' . $filePath);
-                $error = 'Could not remove the file from storage; the record was not deleted.';
-                $doc = false;
+            // Delete intent first: this operation is irreversible, so record it
+            // before the file goes away (plan §6.2).
+            logAudit($pdo, 'delete_intent', 'Permanent delete requested for PH document: ' . $doc['title'], 'ph_document', $deleteId);
+            if (STORAGE_DRIVER === 'r2') {
+                try {
+                    // Idempotent: a genuine 404 already counts as deleted; any
+                    // other failure throws and leaves the row untouched.
+                    R2Storage::default()->delete((string) $doc['file_path']);
+                } catch (StorageException $e) {
+                    error_log('[CHED] archive delete blocked, storage unavailable: ' . get_class($e));
+                    $error = 'Storage temporarily unavailable; nothing was deleted. Please try again.';
+                    $doc = false;
+                }
+            } else {
+                $filePath = securePath($doc['file_path']);
+                if ($filePath && file_exists($filePath) && !@unlink($filePath)) {
+                    error_log('[CHED] archive delete: unlink failed for ph_documents #' . $deleteId . ': ' . $filePath);
+                    $error = 'Could not remove the file from storage; the record was not deleted.';
+                    $doc = false;
+                }
             }
             if ($doc) {
                 $pdo->prepare('DELETE FROM ph_documents WHERE id = ?')->execute([$deleteId]);
@@ -117,11 +153,23 @@ if ($deleteId !== null) {
         $stmt->execute([$deleteId]);
         $doc = $stmt->fetch();
         if ($doc) {
-            $filePath = securePath($doc['file_path']);
-            if ($filePath && file_exists($filePath) && !@unlink($filePath)) {
-                error_log('[CHED] archive delete: unlink failed for documents #' . $deleteId . ': ' . $filePath);
-                $error = 'Could not remove the file from storage; the record was not deleted.';
-                $doc = false;
+            // Delete intent first: this operation is irreversible (plan §6.2).
+            logAudit($pdo, 'delete_intent', 'Permanent delete requested for document: ' . $doc['title'], 'document', $deleteId);
+            if (STORAGE_DRIVER === 'r2') {
+                try {
+                    R2Storage::default()->delete((string) $doc['file_path']);
+                } catch (StorageException $e) {
+                    error_log('[CHED] archive delete blocked, storage unavailable: ' . get_class($e));
+                    $error = 'Storage temporarily unavailable; nothing was deleted. Please try again.';
+                    $doc = false;
+                }
+            } else {
+                $filePath = securePath($doc['file_path']);
+                if ($filePath && file_exists($filePath) && !@unlink($filePath)) {
+                    error_log('[CHED] archive delete: unlink failed for documents #' . $deleteId . ': ' . $filePath);
+                    $error = 'Could not remove the file from storage; the record was not deleted.';
+                    $doc = false;
+                }
             }
             if ($doc) {
                 $pdo->prepare('DELETE FROM documents WHERE id = ?')->execute([$deleteId]);
@@ -150,44 +198,63 @@ if (isset($_POST['unarchive']) && is_numeric($_POST['unarchive'])) {
 
     if ($doc) {
         $deptFolder = deptSlug((int) $doc['department_id'], $pdo);
-        $oldPath = securePath($doc['file_path']);
-        $filename = basename($doc['file_path']);
+        $oldRel = (string) $doc['file_path'];
+        $filename = basename($oldRel);
         $newRelativePath = storageSubdir('admin_repository', $pdo, (int) $doc['department_id'], $table === 'documents' ? documentFolderId($pdo, 'documents', $id) : null) . '/' . $filename;
-        $newFullPath = UPLOAD_PATH . str_replace('/', DIRECTORY_SEPARATOR, $newRelativePath);
-        if (!is_dir(dirname($newFullPath))) {
-            mkdir(dirname($newFullPath), 0755, true);
-        }
 
         $fileRestored = false;
+        $restoreBlocked = false;
 
-        if ($oldPath && file_exists($oldPath)) {
-            if (rename($oldPath, $newFullPath)) {
-                $fileRestored = true;
-            } else {
-                $error = "Failed to move file back to main uploads.";
+        if (STORAGE_DRIVER === 'r2') {
+            // Object keys never move on their own, so the row's file_path is
+            // authoritative — the legacy-subpath fallback below is local-only.
+            try {
+                $fileRestored = storageMoveObject($oldRel, $newRelativePath);
+            } catch (StorageException $e) {
+                error_log('[CHED] unarchive blocked, storage unavailable: ' . get_class($e));
+                $error = 'Storage temporarily unavailable; the document was not restored. Please try again.';
+                $restoreBlocked = true;
             }
         } else {
-            // Try known archived subpaths
-            $archivedCandidates = [
-                UPLOAD_PATH . 'admin_archive' . DIRECTORY_SEPARATOR . $deptFolder . DIRECTORY_SEPARATOR . $filename,
-                UPLOAD_PATH . 'admin_archive' . DIRECTORY_SEPARATOR . $filename,
-            ];
-            foreach ($archivedCandidates as $archivedPath) {
-                if (file_exists($archivedPath)) {
-                    if (rename($archivedPath, $newFullPath)) {
-                        $fileRestored = true;
-                        break;
+            $oldPath = securePath($oldRel);
+            $newFullPath = UPLOAD_PATH . str_replace('/', DIRECTORY_SEPARATOR, $newRelativePath);
+            if (!is_dir(dirname($newFullPath))) {
+                mkdir(dirname($newFullPath), 0755, true);
+            }
+
+            if ($oldPath && file_exists($oldPath)) {
+                if (rename($oldPath, $newFullPath)) {
+                    $fileRestored = true;
+                } else {
+                    $error = "Failed to move file back to main uploads.";
+                }
+            } else {
+                // Try known archived subpaths
+                $archivedCandidates = [
+                    UPLOAD_PATH . 'admin_archive' . DIRECTORY_SEPARATOR . $deptFolder . DIRECTORY_SEPARATOR . $filename,
+                    UPLOAD_PATH . 'admin_archive' . DIRECTORY_SEPARATOR . $filename,
+                ];
+                foreach ($archivedCandidates as $archivedPath) {
+                    if (file_exists($archivedPath)) {
+                        if (rename($archivedPath, $newFullPath)) {
+                            $fileRestored = true;
+                            break;
+                        }
                     }
                 }
             }
         }
 
-        // Preserve expiry_date and validity_status on restore (do not clear them)
-        $pdo->prepare("UPDATE $table SET file_path = ?, archived = 0 WHERE id = ?")
-            ->execute([$fileRestored ? $newRelativePath : $doc['file_path'], $id]);
-        logAudit($pdo, 'unarchive', ($source === 'ph_document' ? 'PH document' : 'Document') . ' restored from archive: ' . $doc['title'], $source, $id);
+        // Preserve expiry_date and validity_status on restore (do not clear them).
+        // Skipped when storage was unavailable: the row must not be flipped to
+        // "live" while its object is still sitting in the archive (plan §9).
+        if (!$restoreBlocked) {
+            $pdo->prepare("UPDATE $table SET file_path = ?, archived = 0 WHERE id = ?")
+                ->execute([$fileRestored ? $newRelativePath : $doc['file_path'], $id]);
+            logAudit($pdo, 'unarchive', ($source === 'ph_document' ? 'PH document' : 'Document') . ' restored from archive: ' . $doc['title'], $source, $id);
 
-        $success = $fileRestored ? "Document successfully restored from archive." : "Document restored (file was missing - restored path in DB only).";
+            $success = $fileRestored ? "Document successfully restored from archive." : "Document restored (file was missing - restored path in DB only).";
+        }
     }
     if (isAjaxRequest()) {
         sendJson(['success' => (bool) $doc, 'message' => $success ?: ($error ?: 'Document not found or already restored.')]);
@@ -331,6 +398,7 @@ if ($filterDept) {
             'id'         => $sf['id'],
             'name'       => $sf['folder_name'],
             'is_folder'  => true,
+            'file_count' => archiveFolderFileCount($pdo, $filterDept, $sf['id']),
         ];
     }
 
@@ -366,7 +434,7 @@ if ($filterDept) {
             'name'              => $docName,
             'filename'          => $doc['filename'],
             'file_path'         => $doc['file_path'],
-            'file_exists'       => (bool)securePath($doc['file_path']),
+            'file_exists'       => !empty($doc['file_path']) && storageFilePresent((string) $doc['file_path']),
             'file_type'         => $fileType,
             'file_ext'          => $ext,
             'upload_date'       => $doc['upload_date'],
@@ -393,11 +461,6 @@ $pageTitle = $filterDept ? 'Archives  ' : 'Document Archives';
 // Real File Explorer–style icons (inline SVG, no background container)
 // -------------------------------------------------------------------------
 if (!function_exists('archive_file_visual')) {
-    /**
-     * Returns ['class' => slug, 'svg' => inline-SVG].
-     * Real Windows File Explorer–style document icons: colored document
-     * shape with folded corner + file-type label. No wrapper, no background.
-     */
     function archive_file_visual(string $fileType, string $ext = ''): array
     {
         $ext = strtolower($ext);
@@ -419,83 +482,24 @@ if (!function_exists('archive_file_visual')) {
             $key = 'text';
         }
 
-        // Shared document body path (viewBox 0 0 48 48)
         $body = 'M10 2h20l10 10v34a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z';
         $fold = 'M30 2l10 10h-8a2 2 0 0 1-2-2V2z';
 
         $icons = [
-            // PDF — red document with "PDF"
-            'pdf' => '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" aria-hidden="true">'
-                . '<path d="' . $body . '" fill="#e53935"/>'
-                . '<path d="' . $fold . '" fill="#b71c1c"/>'
-                . '<text x="24" y="37" font-family="Arial, Helvetica, sans-serif" font-size="10" font-weight="700" fill="#ffffff" text-anchor="middle" letter-spacing="0.3">PDF</text>'
-                . '</svg>',
-
-            // Word — blue document with "W"
-            'word' => '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" aria-hidden="true">'
-                . '<path d="' . $body . '" fill="#2b579a"/>'
-                . '<path d="' . $fold . '" fill="#1e3f70"/>'
-                . '<text x="24" y="38" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">W</text>'
-                . '</svg>',
-
-            // Excel — green document with "X"
-            'excel' => '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" aria-hidden="true">'
-                . '<path d="' . $body . '" fill="#217346"/>'
-                . '<path d="' . $fold . '" fill="#185c37"/>'
-                . '<text x="24" y="38" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">X</text>'
-                . '</svg>',
-
-            // PowerPoint — orange document with "P"
-            'powerpoint' => '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" aria-hidden="true">'
-                . '<path d="' . $body . '" fill="#d24726"/>'
-                . '<path d="' . $fold . '" fill="#a5371e"/>'
-                . '<text x="24" y="38" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">P</text>'
-                . '</svg>',
-
-            // Image — white document with a photo thumbnail
-            'image' => '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" aria-hidden="true">'
-                . '<path d="' . $body . '" fill="#ffffff" stroke="#c8c8c8" stroke-width="1"/>'
-                . '<path d="' . $fold . '" fill="#e0e0e0" stroke="#c8c8c8" stroke-width="1"/>'
-                . '<rect x="13" y="20" width="22" height="16" rx="1" fill="#5eb7e8"/>'
-                . '<circle cx="19" cy="25" r="2" fill="#ffffff"/>'
-                . '<path d="M13 34l6-6 4 4 4-5 8 7z" fill="#7cc576"/>'
-                . '</svg>',
-
-            // Archive — amber document with zipper
-            'archive' => '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" aria-hidden="true">'
-                . '<path d="' . $body . '" fill="#ffc107"/>'
-                . '<path d="' . $fold . '" fill="#e0a800"/>'
-                . '<rect x="20" y="16" width="8" height="2" fill="#5d4037"/>'
-                . '<rect x="20" y="20" width="8" height="2" fill="#5d4037"/>'
-                . '<rect x="20" y="24" width="8" height="2" fill="#5d4037"/>'
-                . '<rect x="20" y="28" width="8" height="2" fill="#5d4037"/>'
-                . '<rect x="20" y="32" width="8" height="6" rx="1" fill="#5d4037"/>'
-                . '</svg>',
-
-            // Text — white document with text lines
-            'text' => '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" aria-hidden="true">'
-                . '<path d="' . $body . '" fill="#ffffff" stroke="#c8c8c8" stroke-width="1"/>'
-                . '<path d="' . $fold . '" fill="#e0e0e0" stroke="#c8c8c8" stroke-width="1"/>'
-                . '<line x1="16" y1="22" x2="32" y2="22" stroke="#9e9e9e" stroke-width="2" stroke-linecap="round"/>'
-                . '<line x1="16" y1="27" x2="32" y2="27" stroke="#9e9e9e" stroke-width="2" stroke-linecap="round"/>'
-                . '<line x1="16" y1="32" x2="26" y2="32" stroke="#9e9e9e" stroke-width="2" stroke-linecap="round"/>'
-                . '</svg>',
-
-            // Default document — white with grey text lines
-            'document' => '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" aria-hidden="true">'
-                . '<path d="' . $body . '" fill="#ffffff" stroke="#c8c8c8" stroke-width="1"/>'
-                . '<path d="' . $fold . '" fill="#e0e0e0" stroke="#c8c8c8" stroke-width="1"/>'
-                . '<line x1="16" y1="22" x2="32" y2="22" stroke="#9e9e9e" stroke-width="2" stroke-linecap="round"/>'
-                . '<line x1="16" y1="27" x2="32" y2="27" stroke="#9e9e9e" stroke-width="2" stroke-linecap="round"/>'
-                . '<line x1="16" y1="32" x2="26" y2="32" stroke="#9e9e9e" stroke-width="2" stroke-linecap="round"/>'
-                . '</svg>',
+            'pdf' => '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" aria-hidden="true"><path d="' . $body . '" fill="#e53935"/><path d="' . $fold . '" fill="#b71c1c"/><text x="24" y="37" font-family="Arial, Helvetica, sans-serif" font-size="10" font-weight="700" fill="#ffffff" text-anchor="middle" letter-spacing="0.3">PDF</text></svg>',
+            'word' => '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" aria-hidden="true"><path d="' . $body . '" fill="#2b579a"/><path d="' . $fold . '" fill="#1e3f70"/><text x="24" y="38" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">W</text></svg>',
+            'excel' => '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" aria-hidden="true"><path d="' . $body . '" fill="#217346"/><path d="' . $fold . '" fill="#185c37"/><text x="24" y="38" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">X</text></svg>',
+            'powerpoint' => '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" aria-hidden="true"><path d="' . $body . '" fill="#d24726"/><path d="' . $fold . '" fill="#a5371e"/><text x="24" y="38" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">P</text></svg>',
+            'image' => '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" aria-hidden="true"><path d="' . $body . '" fill="#ffffff" stroke="#c8c8c8" stroke-width="1"/><path d="' . $fold . '" fill="#e0e0e0" stroke="#c8c8c8" stroke-width="1"/><rect x="13" y="20" width="22" height="16" rx="1" fill="#5eb7e8"/><circle cx="19" cy="25" r="2" fill="#ffffff"/><path d="M13 34l6-6 4 4 4-5 8 7z" fill="#7cc576"/></svg>',
+            'archive' => '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" aria-hidden="true"><path d="' . $body . '" fill="#ffc107"/><path d="' . $fold . '" fill="#e0a800"/><rect x="20" y="16" width="8" height="2" fill="#5d4037"/><rect x="20" y="20" width="8" height="2" fill="#5d4037"/><rect x="20" y="24" width="8" height="2" fill="#5d4037"/><rect x="20" y="28" width="8" height="2" fill="#5d4037"/><rect x="20" y="32" width="8" height="6" rx="1" fill="#5d4037"/></svg>',
+            'text' => '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" aria-hidden="true"><path d="' . $body . '" fill="#ffffff" stroke="#c8c8c8" stroke-width="1"/><path d="' . $fold . '" fill="#e0e0e0" stroke="#c8c8c8" stroke-width="1"/><line x1="16" y1="22" x2="32" y2="22" stroke="#9e9e9e" stroke-width="2" stroke-linecap="round"/><line x1="16" y1="27" x2="32" y2="27" stroke="#9e9e9e" stroke-width="2" stroke-linecap="round"/><line x1="16" y1="32" x2="26" y2="32" stroke="#9e9e9e" stroke-width="2" stroke-linecap="round"/></svg>',
+            'document' => '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" aria-hidden="true"><path d="' . $body . '" fill="#ffffff" stroke="#c8c8c8" stroke-width="1"/><path d="' . $fold . '" fill="#e0e0e0" stroke="#c8c8c8" stroke-width="1"/><line x1="16" y1="22" x2="32" y2="22" stroke="#9e9e9e" stroke-width="2" stroke-linecap="round"/><line x1="16" y1="27" x2="32" y2="27" stroke="#9e9e9e" stroke-width="2" stroke-linecap="round"/><line x1="16" y1="32" x2="26" y2="32" stroke="#9e9e9e" stroke-width="2" stroke-linecap="round"/></svg>',
         ];
 
         return ['class' => $key, 'svg' => $icons[$key] ?? $icons['document']];
     }
 }
 
-// Real Windows-style folder icon — no container
 if (!function_exists('archive_folder_icon')) {
     function archive_folder_icon(): string
     {
@@ -507,108 +511,55 @@ if (!function_exists('archive_folder_icon')) {
 }
 
 // -------------------------------------------------------------------------
-// ENHANCED UI STYLES — Arial-first, matching admin_manage_document.php
+// ENHANCED UI STYLES — Matching admin_manage_document.php
 // -------------------------------------------------------------------------
 ob_start();
 ?>
 <style>
     @import url('offline/inter-font.css');
-    /* ============================================================
-       ARCHIVE — ENHANCED UI
-       Same font + real File Explorer icons as admin_manage_document.php
-       ============================================================ */
-
     :root {
-        /* Brand */
         --primary: #4f46e5;
         --primary-dark: #4338ca;
         --primary-light: #eef2ff;
         --primary-soft: #6366f1;
-
         --secondary: #64748b;
-
         --success: #10b981;
         --success-light: #d1fae5;
-        --success-dark: #065f46;
-
         --warning: #f59e0b;
         --warning-light: #fef3c7;
-        --warning-dark: #92400e;
-
         --danger: #ef4444;
         --danger-light: #fee2e2;
-        --danger-dark: #b91c1c;
-
-        --info: #3b82f6;
-        --info-light: #dbeafe;
-
-        /* Neutrals */
-        --gray-50: #f8fafc;
-        --gray-100: #f1f5f9;
-        --gray-200: #e2e8f0;
-        --gray-300: #cbd5e1;
-        --gray-400: #94a3b8;
-        --gray-500: #64748b;
-        --gray-600: #475569;
-        --gray-700: #334155;
-        --gray-800: #1e293b;
-        --gray-900: #0f172a;
-
+        --gray-50: #f9fafb;
+        --gray-100: #f3f4f6;
+        --gray-200: #e5e7eb;
+        --gray-300: #d1d5db;
+        --gray-400: #9ca3af;
+        --gray-500: #6b7280;
+        --gray-600: #4b5563;
+        --gray-700: #374151;
+        --gray-800: #1f2937;
+        --gray-900: #111827;
         --white: #ffffff;
-        --border: #e6eaf1;
-
-        /* Elevation */
-        --shadow-xs: 0 1px 2px rgba(15, 23, 42, .04);
-        --shadow-sm: 0 1px 3px rgba(15, 23, 42, .06), 0 1px 2px rgba(15, 23, 42, .04);
-        --shadow-md: 0 4px 12px rgba(15, 23, 42, .07), 0 2px 4px rgba(15, 23, 42, .04);
-        --shadow-lg: 0 12px 28px rgba(15, 23, 42, .10), 0 4px 10px rgba(15, 23, 42, .05);
-
-        --radius-sm: 8px;
-        --radius-md: 12px;
-        --radius-lg: 16px;
-        --radius-pill: 9999px;
-
-        --transition: all .2s cubic-bezier(.4, 0, .2, 1);
-        --ease-out: cubic-bezier(.16, 1, .3, 1);
-
-        /* Eye-friendly, Arial-first system font stack (offline) — matches admin_manage_document.php */
+        --border: #e5e7eb;
+        --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+        --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.07), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
+        --shadow-lg: 0 10px 25px -5px rgba(0, 0, 0, 0.08), 0 8px 10px -6px rgba(0, 0, 0, 0.04);
         --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-
-        /* Monospace for file extensions / codes */
-        --font-mono: "Cascadia Mono", Consolas, "SF Mono", Monaco,
-            "Courier New", monospace;
-
-        --app-bg: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 55%, #eef2f7 100%);
     }
 
-    * {
-        box-sizing: border-box;
-    }
+    * { box-sizing: border-box; }
 
     body {
-        background: var(--app-bg);
-        background-attachment: fixed;
+        background: #eef1f7;
         font-family: var(--font-sans);
         color: var(--gray-800);
         font-size: 14.5px;
         line-height: 1.55;
         -webkit-font-smoothing: antialiased;
-        -moz-osx-font-smoothing: grayscale;
         margin: 0;
         min-height: 100vh;
         display: flex;
         flex-direction: column;
-    }
-
-    :focus-visible {
-        outline: 2px solid var(--primary);
-        outline-offset: 2px;
-        border-radius: 4px;
-    }
-
-    ::selection {
-        background: var(--primary-light);
-        color: var(--primary-dark);
     }
 
     .content-area {
@@ -631,904 +582,205 @@ ob_start();
 
     .repo-section {
         flex: 1;
-        background: var(--white);
-        border: 1px solid var(--border);
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
         border-radius: 16px;
-        box-shadow: var(--shadow-sm);
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
         overflow: hidden;
+        display: flex;
+        flex-direction: column;
     }
 
     .repo-body {
-        padding: 1.5rem 1.5rem;
+        padding: 1.6rem 1.75rem 1.75rem;
+        flex: 1;
     }
 
-    /* ============================================================
-       BUTTONS
-       ============================================================ */
     .btn {
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        gap: .4rem;
-        padding: .55rem 1rem;
+        gap: 0.4rem;
+        padding: 0.55rem 1rem;
         border-radius: 10px;
-        font-family: inherit;
-        font-size: .78rem;
+        font-size: 0.8rem;
         font-weight: 600;
         cursor: pointer;
-        transition: var(--transition);
+        transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
         border: 1px solid transparent;
         text-decoration: none;
         line-height: 1.4;
+        font-family: inherit;
         white-space: nowrap;
-        letter-spacing: .01em;
     }
 
-    .btn-sm {
-        padding: .45rem .75rem;
-        font-size: .75rem;
-    }
+    .btn-sm { padding: 0.4rem 0.7rem; font-size: 0.74rem; }
+    .btn-icon { padding: 0.45rem; min-width: 30px; min-height: 30px; justify-content: center; border-radius: 8px; }
+    
+    .btn-outline { background: #ffffff; border-color: #e2e8f0; color: var(--gray-700); }
+    .btn-outline:hover { border-color: #c7d2fe; color: var(--primary-dark); background: #f8faff; }
+    .btn-success { background: #ffffff; border-color: #e2e8f0; color: var(--gray-600); }
+    .btn-success:hover { background: var(--success-light); border-color: #a7f3d0; color: #065f46; }
+    .btn-danger { background: #ffffff; border-color: #e2e8f0; color: var(--gray-600); }
+    .btn-danger:hover { background: #fef2f2; border-color: #fecaca; color: var(--danger); }
+    .btn-disabled { opacity: 0.4; cursor: not-allowed; pointer-events: none; }
 
-    .btn-icon {
-        padding: .5rem;
-        min-width: 32px;
-        min-height: 32px;
-        justify-content: center;
-        border-radius: 8px;
-    }
-
-    .btn-primary {
-        background: var(--primary);
-        color: var(--white);
-        border-color: var(--primary);
-        box-shadow: 0 1px 2px rgba(79, 70, 229, .2);
-    }
-
-    .btn-primary:hover {
-        background: var(--primary-dark);
-        border-color: var(--primary-dark);
-        transform: translateY(-1px);
-        box-shadow: 0 4px 10px rgba(79, 70, 229, .3);
-    }
-
-    .btn-primary:active {
-        transform: translateY(0);
-    }
-
-    .btn-outline {
-        background: #fff;
-        border-color: var(--border);
-        color: var(--gray-700);
-        box-shadow: var(--shadow-xs);
-    }
-
-    .btn-outline:hover {
-        border-color: var(--gray-300);
-        color: var(--gray-800);
-        background: var(--gray-50);
-        box-shadow: var(--shadow-sm);
-        transform: translateY(-1px);
-    }
-
-    .btn-danger {
-        background: #fff;
-        border-color: var(--border);
-        color: var(--gray-600);
-        box-shadow: var(--shadow-xs);
-    }
-
-    .btn-danger:hover {
-        background: var(--danger-light);
-        border-color: #fecaca;
-        color: var(--danger);
-        box-shadow: var(--shadow-sm);
-        transform: translateY(-1px);
-    }
-
-    .btn-success {
-        background: #fff;
-        border-color: var(--border);
-        color: var(--gray-600);
-        box-shadow: var(--shadow-xs);
-    }
-
-    .btn-success:hover {
-        background: var(--success-light);
-        border-color: #a7f3d0;
-        color: var(--success-dark);
-        box-shadow: var(--shadow-sm);
-        transform: translateY(-1px);
-    }
-
-    .btn-disabled {
-        opacity: .45;
-        cursor: not-allowed;
-        pointer-events: none;
-    }
-
-    /* ============================================================
-       BREADCRUMB
-       ============================================================ */
     .breadcrumb-nav {
         display: inline-flex;
         align-items: center;
         flex-wrap: wrap;
-        gap: .35rem;
-        font-family: var(--font-sans);
-        font-size: .82rem;
-        font-weight: 500;
+        gap: 0.35rem;
+        font-size: 0.82rem;
         color: var(--gray-500);
-        margin-bottom: 1.1rem;
-        padding: .5rem 1rem .5rem .75rem;
-        border: 1px solid var(--border);
-        border-radius: var(--radius-pill);
-        background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
-        box-shadow: var(--shadow-xs);
-    }
-
-    .breadcrumb-nav a {
-        color: var(--gray-700);
-        text-decoration: none;
-        font-weight: 600;
-        transition: var(--transition);
-        display: inline-flex;
-        align-items: center;
-        gap: .25rem;
-        padding: .15rem .4rem;
-        border-radius: 6px;
-    }
-
-    .breadcrumb-nav a:hover {
-        color: var(--primary);
-        background: var(--primary-light);
-    }
-
-    .breadcrumb-nav .current {
-        font-weight: 700;
-        color: var(--gray-900);
-        letter-spacing: -.005em;
-        padding: .15rem .4rem;
-    }
-
-    .breadcrumb-nav .separator {
-        color: var(--gray-300);
-        font-weight: 400;
-        padding: 0 .1rem;
-    }
-
-    .breadcrumb-nav .home-icon {
-        width: 15px;
-        height: 15px;
-        display: inline-block;
-        vertical-align: middle;
-        color: var(--primary);
-    }
-
-    /* ============================================================
-       DEPARTMENT CARDS
-       ============================================================ */
-    .dept-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-        gap: .9rem;
-    }
-
-    .dept-card {
-        position: relative;
-        background: #fff;
-        border-radius: 12px;
-        border: 1px solid var(--border);
-        padding: 1.05rem 1rem .9rem;
-        transition: var(--transition);
-        cursor: pointer;
-        text-decoration: none;
-        color: inherit;
-        box-shadow: var(--shadow-xs);
-        display: flex;
-        flex-direction: column;
-        min-height: 150px;
-        overflow: hidden;
-    }
-
-    .dept-card::before {
-        content: '';
-        position: absolute;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        height: 3px;
-        background: linear-gradient(90deg, var(--primary) 0%, var(--primary-soft) 100%);
-        opacity: 0;
-        transition: opacity .25s ease;
-    }
-
-    .dept-card::after {
-        content: '';
-        position: absolute;
-        inset: 0;
-        background: radial-gradient(circle at 100% 0%,
-                rgba(79, 70, 229, .06) 0%, transparent 55%);
-        opacity: 0;
-        transition: opacity .3s ease;
-        pointer-events: none;
-    }
-
-    .dept-card:hover {
-        transform: translateY(-3px);
-        box-shadow: var(--shadow-lg);
-        border-color: #c7d2fe;
-    }
-
-    .dept-card:hover::before,
-    .dept-card:hover::after {
-        opacity: 1;
-    }
-
-    /* Real folder icon — no background box, just the icon */
-    .dept-card .folder-icon-big {
-        display: inline-flex;
-        align-items: center;
-        justify-content: flex-start;
-        width: auto;
-        height: auto;
-        padding: 0;
-        margin-bottom: .55rem;
-        background: transparent;
-        border: none;
-        flex-shrink: 0;
-    }
-
-    .dept-card .folder-icon-big svg {
-        width: 38px;
-        height: 38px;
-        display: block;
-    }
-
-    .dept-card .dept-name {
-        font-size: .95rem;
-        font-weight: 700;
-        line-height: 1.3;
-        margin: 0 0 .25rem 0;
-        color: var(--gray-900);
-        letter-spacing: -.01em;
-    }
-
-    .dept-card .dept-code {
-        font-family: var(--font-mono);
-        font-size: .65rem;
-        color: var(--gray-600);
-        font-weight: 600;
-        margin-bottom: .55rem;
-        text-transform: uppercase;
-        letter-spacing: .09em;
-        background: var(--gray-100);
-        align-self: flex-start;
-        padding: .2rem .55rem;
-        border-radius: var(--radius-pill);
-    }
-
-    .dept-stats {
-        display: flex;
-        gap: .4rem;
-        margin-top: auto;
-        padding-top: .65rem;
-        border-top: 1px solid var(--gray-100);
-    }
-
-    .dept-stats .stat-pill {
-        flex: 1;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        gap: .3rem;
-        background: var(--gray-50);
-        border: 1px solid var(--gray-200);
-        padding: .38rem .5rem;
-        border-radius: 9px;
-        font-size: .7rem;
-        line-height: 1.3;
-        transition: var(--transition);
-        min-width: 0;
-    }
-
-    .dept-stats .stat-pill:hover {
-        border-color: var(--gray-300);
-        background: #fff;
-    }
-
-    .dept-stats .stat-pill svg {
-        width: 13px;
-        height: 13px;
-        flex-shrink: 0;
-        opacity: .55;
-    }
-
-    .dept-stats .stat-pill .stat-number {
-        font-weight: 800;
-        color: var(--gray-800);
-        font-variant-numeric: tabular-nums lining-nums;
-    }
-
-    .dept-stats .stat-pill .stat-label {
-        color: var(--gray-500);
-        font-weight: 500;
-    }
-
-    .dept-card .arrow {
-        position: absolute;
-        top: .85rem;
-        right: .85rem;
-        width: 26px;
-        height: 26px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        background: var(--gray-50);
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        transition: var(--transition);
-        font-size: .8rem;
-        color: var(--gray-500);
-        font-weight: 700;
-    }
-
-    .dept-card:hover .arrow {
-        background: var(--primary);
-        border-color: var(--primary);
-        color: #fff;
-        transform: translateX(2px);
-    }
-
-    .dept-card .last-archived {
-        font-size: .72rem;
-        color: var(--gray-400);
-        margin-top: .35rem;
-        font-weight: 500;
-    }
-
-    /* ============================================================
-       CONTENT LIST
-       ============================================================ */
-    .content-list {
-        display: flex;
-        flex-direction: column;
-        gap: .55rem;
-    }
-
-    .content-item {
-        display: flex;
-        align-items: center;
-        padding: .95rem 1.15rem;
-        border: 1px solid var(--border);
-        border-radius: 12px;
-        transition: var(--transition);
-        gap: 1rem;
-        cursor: default;
-        background: #fff;
-        position: relative;
-        overflow: hidden;
-    }
-
-    .content-item::before {
-        content: '';
-        position: absolute;
-        top: 12px;
-        bottom: 12px;
-        left: 0;
-        width: 3px;
-        border-radius: 0 3px 3px 0;
-        background: var(--primary);
-        opacity: 0;
-        transition: opacity .2s ease;
-    }
-
-    .content-item:hover {
-        background: var(--gray-50);
-        border-color: var(--gray-200);
-        box-shadow: var(--shadow-sm);
-        transform: translateX(2px);
-    }
-
-    .content-item:hover::before {
-        opacity: 1;
-    }
-
-    .content-item.folder-item {
-        cursor: pointer;
-    }
-
-    .content-item.folder-item::before {
-        background: var(--warning);
-    }
-
-    .content-item.folder-item:hover {
-        background: linear-gradient(180deg, #ffffff 0%, #fefce8 100%);
-        border-color: #fde68a;
-        box-shadow: var(--shadow-md);
-        transform: translateX(3px);
-    }
-
-    /* Icon slot — transparent, just sizes the SVG. Real icon colors live inside the SVG. */
-    .content-item .icon {
-        width: 32px;
-        height: 32px;
-        flex-shrink: 0;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        padding: 0;
-        background: transparent;
-        border: none;
-        border-radius: 0;
-        box-shadow: none;
-        transition: transform 0.2s ease;
-    }
-
-    .content-item .icon svg {
-        width: 100%;
-        height: 100%;
-        display: block;
-    }
-
-    .content-item:hover .icon {
-        transform: scale(1.08);
-    }
-
-    /* No color overrides — colors come from the SVG itself */
-    .content-item .icon.folder-icon,
-    .content-item .icon.file-icon {
-        background: transparent;
-        border: none;
-        color: inherit;
-    }
-
-    .content-item .info {
-        flex: 1;
-        min-width: 0;
-        display: flex;
-        flex-direction: column;
-        gap: .2rem;
-    }
-
-    .content-item .info .name {
-        font-weight: 700;
-        font-size: .9rem;
-        color: var(--gray-900);
-        display: flex;
-        align-items: center;
-        gap: .5rem;
-        flex-wrap: wrap;
-        line-height: 1.4;
-        overflow-wrap: break-word;
-    }
-
-    .content-item .info .name .badge {
-        display: inline-flex;
-        align-items: center;
-        padding: .18rem .55rem;
-        border-radius: var(--radius-pill);
-        font-size: .62rem;
-        font-weight: 700;
-        line-height: 1.25;
-        background: var(--gray-100);
-        color: var(--gray-600);
-        text-transform: uppercase;
-        letter-spacing: .06em;
-        border: 1px solid var(--gray-200);
-    }
-
-    .content-item .info .name .badge.missing {
-        background: var(--danger-light);
-        color: var(--danger-dark);
-        border-color: #fecaca;
-    }
-
-    .content-item .info .meta {
-        font-size: .74rem;
-        color: var(--gray-500);
-        display: flex;
-        gap: .75rem;
-        flex-wrap: wrap;
-        align-items: center;
-    }
-
-    .content-item .info .meta span {
-        display: inline-flex;
-        align-items: center;
-        gap: .28rem;
-    }
-
-    .content-item .actions {
-        display: flex;
-        gap: .3rem;
-        flex-shrink: 0;
-        align-items: center;
-    }
-
-    /* ============================================================
-       EMPTY STATE
-       ============================================================ */
-    .empty-state {
-        text-align: center;
-        padding: 3rem 1.5rem;
-        color: var(--gray-500);
-        border: 1px dashed var(--border);
-        border-radius: 12px;
-        background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
-    }
-
-    .empty-state svg {
-        width: 42px;
-        height: 42px;
-        margin: 0 auto .85rem;
-        display: block;
-        opacity: .45;
-        color: var(--gray-400);
-    }
-
-    .empty-state p {
-        font-size: .92rem;
-        font-weight: 600;
-        color: var(--gray-500);
-        margin: 0;
-    }
-
-    /* ============================================================
-       MODALS
-       ============================================================ */
-    .modal {
-        display: none;
-        position: fixed;
-        inset: 0;
-        z-index: 2000;
-        background: rgba(15, 23, 42, .55);
-        backdrop-filter: blur(6px);
-        -webkit-backdrop-filter: blur(6px);
-        align-items: center;
-        justify-content: center;
-        padding: 1.5rem;
-    }
-
-    .modal.show {
-        display: flex;
-        animation: modalFadeIn .2s ease;
-    }
-
-    @keyframes modalFadeIn {
-        from {
-            opacity: 0;
-        }
-
-        to {
-            opacity: 1;
-        }
-    }
-
-    .modal-content {
-        background: var(--white);
-        border-radius: 16px;
-        width: 100%;
-        max-width: 520px;
-        box-shadow: 0 24px 60px rgba(15, 23, 42, .25), 0 8px 24px rgba(15, 23, 42, .12);
-        animation: slideUp .3s var(--ease-out);
-        border: 1px solid var(--border);
-        overflow: hidden;
-    }
-
-    @keyframes slideUp {
-        from {
-            transform: translateY(16px) scale(.98);
-            opacity: 0;
-        }
-
-        to {
-            transform: translateY(0) scale(1);
-            opacity: 1;
-        }
-    }
-
-    /* Success toast — top banner, hugs text, no backdrop, page stays clickable */
-    #successModal {
-        background: none;
-        backdrop-filter: none;
-        -webkit-backdrop-filter: none;
-        padding: 0;
-        align-items: flex-start;
-        justify-content: center;
-        pointer-events: none;
-    }
-
-    #successModal.show {
-        animation: none;
-    }
-
-    #successModal .modal-content {
-        pointer-events: auto;
-        width: auto;
-        max-width: calc(100vw - 2rem);
-        margin-top: 16px;
-        border-radius: 10px;
-        border: 1px solid #bbf7d0;
-        border-left: 4px solid #16a34a;
-        background: #f0fdf4;
-        box-shadow: 0 12px 32px rgba(15, 23, 42, .16);
-        animation: archToastDrop .26s cubic-bezier(.2, .9, .3, 1);
-        overflow: visible;
-    }
-
-    @keyframes archToastDrop {
-        from {
-            transform: translateY(-18px);
-            opacity: 0;
-        }
-
-        to {
-            transform: translateY(0);
-            opacity: 1;
-        }
-    }
-
-    .toast-row {
-        display: flex;
-        align-items: center;
-        gap: .55rem;
-        padding: .7rem .75rem .7rem .9rem;
-        font-size: .88rem;
-        font-weight: 600;
-        color: #14532d;
-    }
-
-    .toast-row>svg {
-        flex-shrink: 0;
-        color: #16a34a;
-    }
-
-    .toast-dismiss {
-        margin-left: .35rem;
-        flex-shrink: 0;
-        border: 0;
-        background: transparent;
-        color: #4d7c5f;
-        cursor: pointer;
-        padding: .2rem;
-        border-radius: 6px;
-        display: flex;
-    }
-
-    .toast-dismiss:hover {
-        background: rgba(22, 163, 74, .12);
-        color: #166534;
-    }
-
-    .modal-header {
-        padding: 1.15rem 1.5rem;
-        border-bottom: 1px solid var(--border);
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        background: linear-gradient(180deg, #ffffff 0%, #f9fafb 100%);
-    }
-
-    .modal-header h3 {
-        margin: 0;
-        font-size: 1.05rem;
-        font-weight: 700;
-        color: var(--gray-900);
-        display: flex;
-        align-items: center;
-        gap: .55rem;
-        letter-spacing: -.01em;
-    }
-
-    .modal-header h3 svg {
-        flex-shrink: 0;
-    }
-
-    .modal-header h3::before {
-        display: none;
-    }
-
-    .restore-modal .modal-header h3 svg {
-        color: var(--success);
-    }
-
-    .modal:not(.restore-modal) .modal-header h3 svg {
-        color: var(--danger);
-    }
-
-    .modal-body {
-        padding: 1.5rem;
-        background: #fff;
-    }
-
-    .modal-body p {
-        margin: 0 0 .85rem 0;
-        color: var(--gray-700);
-        font-size: .9rem;
-        line-height: 1.55;
-    }
-
-    .modal-body p strong {
-        color: var(--gray-900);
-        font-weight: 700;
-        display: inline-block;
-        padding: .5rem .75rem;
-        background: var(--gray-50);
-        border: 1px solid var(--border);
-        border-radius: 8px;
+        margin-bottom: 1.35rem;
+        padding: 0.5rem 1rem;
+        border: 1px solid #e5e7eb;
+        border-radius: 9999px;
+        background: #f9fafb;
         max-width: 100%;
+    }
+    .breadcrumb-nav a { color: var(--gray-600); text-decoration: none; font-weight: 600; transition: color 0.15s ease, background 0.15s ease; display: inline-flex; align-items: center; gap: 0.2rem; padding: 0.15rem 0.4rem; border-radius: 6px; }
+    .breadcrumb-nav a:hover { color: var(--primary); background: #eef2ff; }
+    .breadcrumb-nav .current { font-weight: 700; color: var(--gray-900); letter-spacing: -0.01em; padding: 0.15rem 0.4rem; }
+    .breadcrumb-nav .separator { color: var(--gray-300); font-weight: 400; padding: 0 0.1rem; }
+    .breadcrumb-nav .home-icon { width: 15px; height: 15px; display: inline-block; vertical-align: middle; margin-right: 0.1rem; color: var(--primary); }
+
+    /* =========================================
+       DEPARTMENT CARDS
+       ========================================= */
+    .dept-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 1rem; }
+    .dept-card {
+        background: #ffffff;
+        border-radius: 14px;
+        border: 1px solid #e5e7eb;
+        padding: 1.25rem;
+        transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+        text-decoration: none;
+        color: inherit;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+        position: relative;
+        display: flex;
+        flex-direction: column;
+    }
+    .dept-card:hover { transform: translateY(-3px); box-shadow: 0 10px 22px -12px rgba(30, 41, 59, 0.2); border-color: #c7d2fe; }
+    .dept-card .folder-icon-big { display: inline-flex; margin-bottom: 0.75rem; }
+    .dept-card .folder-icon-big svg { width: 38px; height: 38px; display: block; }
+    .dept-card .dept-name { font-size: 0.95rem; font-weight: 700; color: var(--gray-900); margin-bottom: 0.25rem; }
+    .dept-card .dept-code { font-size: 0.65rem; color: var(--gray-500); font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.5rem; }
+    .dept-card .arrow { position: absolute; top: 1.25rem; right: 1.25rem; width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; color: var(--gray-500); transition: all 0.18s ease; }
+    .dept-card:hover .arrow { background: var(--primary); border-color: var(--primary); color: white; }
+    .dept-card .dept-stats { display: flex; gap: 0.5rem; margin-top: auto; padding-top: 0.75rem; border-top: 1px solid var(--gray-100); }
+    .dept-card .stat-pill { display: inline-flex; align-items: center; gap: 0.3rem; background: #f9fafb; border: 1px solid #e5e7eb; padding: 0.25rem 0.5rem; border-radius: 6px; font-size: 0.7rem; color: var(--gray-500); }
+    .dept-card .stat-pill .stat-number { font-weight: 700; color: var(--gray-700); }
+
+    /* =========================================
+       INNER FOLDER & FILE GRIDS (The match)
+       ========================================= */
+    .folder-contents-wrap {
+        background: #FDFCF8;
+        border-radius: 16px;
+        padding: 1.5rem;
+        margin: 0 -1.75rem -1.75rem -1.75rem;
+    }
+
+    .folder-list-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.25rem; margin-bottom: 1.5rem; }
+    
+    .folder-item-card {
+        display: flex;
+        align-items: center;
+        background: #ffffff;
+        border: 1px solid #E8E4D9;
+        border-radius: 12px;
+        height: 76px;
+        transition: border-color 0.18s ease, box-shadow 0.18s ease;
+        text-decoration: none;
+        color: inherit;
+        overflow: hidden;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+        cursor: pointer;
+        position: relative;
+    }
+    .folder-item-card:hover { box-shadow: 0 4px 12px -4px rgba(0, 0, 0, 0.08); border-color: #D6D0C4; }
+    .folder-item-card .folder-link-area { display: flex; align-items: center; flex: 1; height: 100%; padding: 0 1rem; gap: 1rem; text-decoration: none; color: inherit; }
+    .folder-item-card .folder-icon { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; flex-shrink: 0; }
+    .folder-item-card .folder-icon svg { width: 100%; height: 100%; }
+    .folder-item-card .folder-info-group { display: flex; flex-direction: column; justify-content: center; flex: 1; min-width: 0; }
+    .folder-item-card .folder-name { font-size: 0.95rem; font-weight: 600; line-height: 1.3; margin: 0; color: #333; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .folder-item-card .folder-count { font-size: 0.75rem; color: #888; font-weight: 400; margin-top: 0.15rem; }
+    .folder-item-card .folder-arrow { display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; color: #BBB; flex-shrink: 0; transition: color 0.18s ease, transform 0.18s ease; }
+    .folder-item-card:hover .folder-arrow { color: #555; transform: translateX(2px); }
+    .folder-item-card .folder-zip-btn { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; margin-right: 1rem; background: #F9F8F4; border: 1px solid #EEEBE2; border-radius: 8px; text-decoration: none; color: #888; transition: all 0.18s ease; flex-shrink: 0; }
+    .folder-item-card .folder-zip-btn:hover { border-color: #D6D0C4; background: #ffffff; color: #333; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+
+    .files-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem; }
+    .file-card { display: flex; align-items: center; background: #ffffff; border: 1px solid #E8E4D9; border-radius: 12px; padding: 12px 16px; gap: 14px; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02); transition: box-shadow 0.18s ease, border-color 0.18s ease; position: relative; cursor: pointer; }
+    .file-card:hover { box-shadow: 0 4px 12px -4px rgba(0, 0, 0, 0.08); border-color: #D6D0C4; }
+    .file-card .icon-wrapper { width: 44px; height: 44px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
+    .file-card .icon-wrapper svg { width: 100%; height: 100%; }
+    .file-card .file-info { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+    .file-card .file-name { font-size: 0.9rem; font-weight: 600; color: #333; margin: 0 0 4px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.3; }
+    .file-card .file-meta { font-size: 0.75rem; color: #888; display: flex; align-items: center; gap: 4px; }
+    .file-card .file-actions { display: flex; gap: 6px; flex-shrink: 0; }
+    .action-btn { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 8px; border: none; cursor: pointer; transition: all 0.18s ease; text-decoration: none; }
+    .action-btn.preview-btn { background: transparent; color: #555; border: 1px solid #EEEBE2; }
+    .action-btn.preview-btn:hover { background: #F9F8F4; color: #333; }
+    .action-btn.download-btn { background: #1A1A1A; color: #FFF; }
+    .action-btn.download-btn:hover { background: #333; }
+    .action-btn.delete-btn { background: transparent; color: #ef4444; border: 1px solid #fee2e2; }
+    .action-btn.delete-btn:hover { background: #fef2f2; }
+    .action-btn.restore-btn { background: transparent; color: #f59e0b; border: 1px solid #fef3c7; }
+    .action-btn.restore-btn:hover { background: #fffbeb; }
+    .action-btn.disabled { opacity: 0.3; cursor: not-allowed; }
+
+    /* File info modal */
+    .file-info-name {
+        margin: 0;
+        padding: 0.75rem 1rem;
+        background: var(--gray-50);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        font-size: 1rem;
+        font-weight: 600;
+        color: var(--gray-900);
         word-break: break-word;
     }
 
-    .close-btn {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        background: #fff;
-        border: 1px solid var(--border);
-        cursor: pointer;
-        width: 32px;
-        height: 32px;
-        border-radius: 8px;
-        color: var(--gray-500);
-        transition: var(--transition);
-        font-size: 1.25rem;
-        line-height: 1;
-    }
+    /* Modals & Toast */
+    .modal { display: none; position: fixed; inset: 0; z-index: 2000; background: rgba(15, 23, 42, .55); backdrop-filter: blur(4px); align-items: center; justify-content: center; padding: 1.5rem; }
+    .modal.show { display: flex; animation: modalFadeIn .2s ease; }
+    @keyframes modalFadeIn { from { opacity: 0; } to { opacity: 1; } }
+    .modal-content { background: var(--white); border-radius: 16px; width: 100%; max-width: 480px; box-shadow: 0 24px 60px rgba(15, 23, 42, .25); overflow: hidden; animation: slideUp .3s ease; }
+    @keyframes slideUp { from { transform: translateY(16px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+    .modal-header { padding: 1.15rem 1.5rem; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+    .modal-header h3 { margin: 0; font-size: 1.05rem; font-weight: 700; color: var(--gray-900); display: flex; align-items: center; gap: .55rem; }
+    .modal-body { padding: 1.5rem; }
+    .modal-body p { margin: 0 0 .85rem 0; color: var(--gray-700); font-size: .9rem; }
+    .modal-body strong { color: var(--gray-900); display: block; padding: .5rem .75rem; background: var(--gray-50); border: 1px solid var(--border); border-radius: 8px; word-break: break-word; }
+    .close-btn { background: #fff; border: 1px solid var(--border); cursor: pointer; width: 32px; height: 32px; border-radius: 8px; color: var(--gray-500); font-size: 1.25rem; line-height: 1; }
+    .close-btn:hover { background: var(--gray-50); color: var(--gray-800); }
 
-    .close-btn:hover {
-        background: var(--gray-50);
-        color: var(--gray-800);
-        border-color: var(--gray-300);
-    }
+    #successModal { background: none; backdrop-filter: none; align-items: flex-start; justify-content: center; pointer-events: none; padding: 0; }
+    #successModal .modal-content { pointer-events: auto; width: auto; margin-top: 16px; border-radius: 10px; border: 1px solid #bbf7d0; border-left: 4px solid #16a34a; background: #f0fdf4; }
+    .toast-row { display: flex; align-items: center; gap: .55rem; padding: .7rem .75rem .7rem .9rem; font-size: .88rem; font-weight: 600; color: #14532d; }
+    .toast-dismiss { margin-left: .35rem; border: 0; background: transparent; color: #4d7c5f; cursor: pointer; padding: .2rem; border-radius: 6px; }
 
-    /* ============================================================
-       ALERTS
-       ============================================================ */
-    .alert {
-        padding: .9rem 1.1rem;
-        border-radius: 12px;
-        font-weight: 600;
-        display: flex;
-        align-items: center;
-        gap: .75rem;
-        font-size: .9rem;
-        border: 1px solid;
-        box-shadow: var(--shadow-sm);
-        animation: slideDown .25s ease;
-    }
-
-    @keyframes slideDown {
-        from {
-            opacity: 0;
-            transform: translateX(-50%) translateY(-8px);
-        }
-
-        to {
-            opacity: 1;
-            transform: translateX(-50%) translateY(0);
-        }
-    }
-
-    .alert-success {
-        background: linear-gradient(135deg, #ecfdf5 0%, #f6fffb 100%);
-        color: var(--success-dark);
-        border-color: #a7f3d0;
-    }
-
-    .alert-danger {
-        background: linear-gradient(135deg, #fef2f2 0%, #fff7f7 100%);
-        color: var(--danger-dark);
-        border-color: #fecaca;
-    }
-
-    .archive-flash {
-        position: fixed;
-        top: 1.25rem;
-        left: 50%;
-        transform: translateX(-50%);
-        z-index: 20000;
-        max-width: min(420px, calc(100vw - 2rem));
-        margin: 0;
-        box-shadow: var(--shadow-lg);
-    }
-
-    /* ============================================================
-       RESPONSIVE
-       ============================================================ */
-    @media (max-width: 992px) {
-        .dashboard-container {
-            padding: .2rem;
-        }
-
-        .repo-body {
-            padding: 1.5rem;
-        }
-
-        .dept-grid {
-            grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
-        }
-    }
-
-    @media (max-width: 768px) {
-        .dashboard-container {
-            padding: .2rem;
-        }
-
-        .repo-body {
-            padding: 1.25rem;
-        }
-
-        .dept-grid {
-            grid-template-columns: 1fr;
-            gap: 1rem;
-        }
-
-        .content-item {
-            padding: .85rem;
-            flex-wrap: wrap;
-            gap: .7rem;
-        }
-
-        .content-item .actions {
-            margin-left: auto;
-        }
-
-        .breadcrumb-nav {
-            font-size: .8rem;
-        }
-    }
-
-    @media (max-width: 480px) {
-        .content-item {
-            flex-direction: column;
-            align-items: stretch;
-        }
-
-        .content-item .info {
-            width: 100%;
-        }
-
-        .content-item .actions {
-            justify-content: flex-end;
-        }
-
-        .modal {
-            padding: 1rem;
-        }
-    }
-
-    @media (prefers-reduced-motion: reduce) {
-
-        *,
-        *::before,
-        *::after {
-            animation-duration: .001ms !important;
-            transition-duration: .001ms !important;
-        }
-    }
+    @media (max-width: 992px) { .folder-list-grid { grid-template-columns: repeat(2, 1fr); } }
+    @media (max-width: 768px) { .folder-list-grid { grid-template-columns: 1fr; } .files-grid { grid-template-columns: 1fr; } .folder-contents-wrap { padding: 1rem; margin: 0 -1.25rem -1.25rem -1.25rem; } }
 </style>
 <?php
 $extraStyles = ob_get_clean();
-
 include 'includes/header.php';
 ?>
 
 <div class="dashboard-container">
-
     <div class="repo-section">
-
+        
         <?php if ($error): ?>
-            <div class="alert alert-danger" role="alert" aria-live="assertive" style="margin:0 0 1rem;">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink:0;">
-                    <circle cx="12" cy="12" r="10" />
-                    <line x1="12" y1="8" x2="12" y2="12" />
-                    <line x1="12" y1="16" x2="12.01" y2="16" />
-                </svg>
+            <div class="alert alert-danger" role="alert" style="margin:1.5rem 1.75rem 0;">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
                 <?= htmlspecialchars($error) ?>
             </div>
         <?php endif; ?>
-
 
         <?php if (!$filterDept): ?>
             <!-- ===== DEPARTMENT CARDS ===== -->
@@ -1539,7 +791,9 @@ include 'includes/header.php';
                         $code = $d['code'] ?? '';
                     ?>
                         <a href="admin_archive_documents.php?dept=<?= $d['id'] ?>" class="dept-card" data-name="<?= sanitize(strtolower($d['department_name'])) ?>">
-                            <span class="arrow">→</span>
+                            <span class="arrow">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6" /></svg>
+                            </span>
                             <div class="folder-icon-big"><?= archive_folder_icon() ?></div>
                             <div class="dept-name"><?= sanitize($d['department_name']) ?></div>
                             <?php if ($code): ?>
@@ -1547,23 +801,14 @@ include 'includes/header.php';
                             <?php endif; ?>
                             <div class="dept-stats">
                                 <span class="stat-pill">
-                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                        <polyline points="21 8 21 21 3 21 3 8" />
-                                        <rect x="1" y="3" width="22" height="5" />
-                                        <line x1="10" y1="12" x2="14" y2="12" />
-                                    </svg>
-                                    <span class="stat-number"><?= $stats['file_count'] ?></span>
-                                    <span class="stat-label">Archived</span>
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
+                                    <span class="stat-number"><?= $stats['file_count'] ?></span> Archived
                                 </span>
                                 <span class="stat-pill">
-                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                        <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 4H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z" />
-                                    </svg>
-                                    <span class="stat-number"><?= $stats['folder_count'] ?></span>
-                                    <span class="stat-label">Folders</span>
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 4H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
+                                    <span class="stat-number"><?= $stats['folder_count'] ?></span> Folders
                                 </span>
                             </div>
-                            <div class="last-archived">Last archived: <?= $stats['last_archived'] ?></div>
                         </a>
                     <?php endforeach; ?>
                 </div>
@@ -1572,14 +817,9 @@ include 'includes/header.php';
         <?php else: ?>
             <!-- ===== FILE LIST VIEW (ARCHIVES) ===== -->
             <div class="repo-body">
-
-                <!-- Breadcrumb Navigation -->
                 <div class="breadcrumb-nav">
                     <a href="admin_archive_documents.php" title="All Departments">
-                        <svg class="home-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-                            <polyline points="9 22 9 12 15 12 15 22" />
-                        </svg>
+                        <svg class="home-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /><polyline points="9 22 9 12 15 12 15 22" /></svg>
                         All Departments
                     </a>
                     <span class="separator">/</span>
@@ -1603,141 +843,131 @@ include 'includes/header.php';
                     <?php endif; ?>
                 </div>
 
-                <div class="content-list" id="contentList">
-                    <?php if (empty($folderContents)): ?>
-                        <div class="empty-state">
-                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                                <polyline points="14 2 14 8 20 8" />
-                            </svg>
-                            <p>No archived items found in this folder.</p>
+                <?php
+                $folderItems = array_filter($folderContents, fn($item) => $item['is_folder']);
+                $fileItems = array_filter($folderContents, fn($item) => !$item['is_folder']);
+                ?>
+
+                <div class="folder-contents-wrap">
+                    <?php if (empty($folderItems) && empty($fileItems)): ?>
+                        <div class="empty-state" style="text-align: center; padding: 3.5rem 1.5rem; color: var(--gray-500);">
+                            <svg width="46" height="46" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="margin:0 auto 1rem; opacity:0.3;"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
+                            <p style="font-size:0.92rem; font-weight:600; margin:0;">No archived items found in this folder.</p>
                         </div>
                     <?php else: ?>
-                        <?php foreach ($folderContents as $item): ?>
-                            <?php if ($item['is_folder']): ?>
-                                <div class="content-item folder-item" data-search="<?= sanitize(strtolower($item['name'])) ?>" data-type="folder"
-                                    data-csp-href="admin_archive_documents.php?dept=<?= $filterDept ?>&folder=<?= $item['id'] ?>">
-                                    <div class="icon folder-icon">
-                                        <?= archive_folder_icon() ?>
+                        
+                        <?php if (!empty($folderItems)): ?>
+                            <div class="folder-list-grid">
+                                <?php foreach ($folderItems as $item): ?>
+                                    <div class="folder-item-card" data-search="<?= sanitize(strtolower($item['name'])) ?>" data-csp-href="admin_archive_documents.php?dept=<?= $filterDept ?>&folder=<?= $item['id'] ?>">
+                                        <a href="?dept=<?= $filterDept ?>&folder=<?= $item['id'] ?>" class="folder-link-area">
+                                            <div class="folder-icon"><?= archive_folder_icon() ?></div>
+                                            <div class="folder-info-group">
+                                                <div class="folder-name"><?= sanitize($item['name']) ?></div>
+                                                <div class="folder-count"><?= (int)($item['file_count'] ?? 0) ?> files</div>
+                                            </div>
+                                            <span class="folder-arrow">
+                                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6" /></svg>
+                                            </span>
+                                        </a>
+                                        <a href="?action=folder_zip&folder=<?= $item['id'] ?>&dept=<?= $filterDept ?>" class="folder-zip-btn" title="Download folder as ZIP" onclick="return confirm('Download folder as ZIP?');">
+                                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
+                                        </a>
                                     </div>
-                                    <div class="info">
-                                        <div class="name"><?= sanitize($item['name']) ?></div>
-                                        <div class="meta">
-                                            <span>Folder</span>
-                                        </div>
-                                    </div>
-                                    <div class="actions">
-                                        <span class="btn btn-sm btn-icon" style="cursor:default;opacity:.5;">›</span>
-                                    </div>
-                                </div>
-                            <?php else: ?>
-                                <?php
-                                $fileExists = $item['file_exists'] ?? false;
-                                $uploadDate = !empty($item['upload_date']) ? date('M d, Y g:i A', strtotime($item['upload_date'])) : 'Unknown';
-                                $visual = archive_file_visual($item['file_type'] ?? '', $item['file_ext'] ?? '');
+                                <?php endforeach; ?>
+                            </div>
+                        <?php endif; ?>
+
+                        <?php if (!empty($fileItems)): ?>
+                            <div class="files-grid" id="contentList">
+                                <?php foreach ($fileItems as $item): 
+                                    $fileExists = $item['file_exists'] ?? false;
+                                    $uploadDate = !empty($item['upload_date']) ? date('M d', strtotime($item['upload_date'])) : 'Unknown';
+                                    $visual = archive_file_visual($item['file_type'] ?? '', $item['file_ext'] ?? '');
                                 ?>
-                                <div class="content-item" data-search="<?= sanitize(strtolower($item['name'])) ?>" data-type="file" data-filetype="<?= $visual['class'] ?>">
-                                    <div class="icon file-icon">
-                                        <?= $visual['svg'] ?>
-                                    </div>
-                                    <div class="info">
-                                        <div class="name">
-                                            <?= sanitize($item['name']) ?>
-                                            <?php if (!$fileExists): ?>
-                                                <span class="badge missing">Missing</span>
+                                    <div class="file-card" data-row-id="<?= $item['source'] ?>:<?= (int)$item['id'] ?>" data-search="<?= sanitize(strtolower($item['name'])) ?>" data-type="file" data-doc-name="<?= sanitize($item['name']) ?>">
+                                        <div class="icon-wrapper">
+                                            <?= $visual['svg'] ?>
+                                        </div>
+                                        <div class="file-info">
+                                            <div class="file-name" title="<?= sanitize($item['name']) ?>">
+                                                <?= sanitize($item['name']) ?>
+                                                <?php if (!$fileExists): ?><span style="color:var(--danger); font-size:0.7rem;">(Missing)</span><?php endif; ?>
+                                            </div>
+                                            <div class="file-meta">
+                                                <span><?= $uploadDate ?></span>
+                                            </div>
+                                        </div>
+                                        <div class="file-actions">
+                                            <button type="button" class="action-btn preview-btn view-btn"
+                                                data-id="<?= $item['id'] ?>"
+                                                data-type="<?= $item['source'] ?>"
+                                                data-title="<?= sanitize($item['name']) ?>"
+                                                data-filename="<?= sanitize($item['filename']) ?>"
+                                                title="Preview">
+                                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" /></svg>
+                                            </button>
+                                            
+                                            <?php if ($fileExists): ?>
+                                                <button type="button" class="action-btn restore-btn restore-btn" title="Restore to active" data-id="<?= $item['id'] ?>" data-source="<?= $item['source'] ?>" data-title="<?= sanitize($item['name']) ?>">
+                                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 1-9 9m9-9a9 9 0 0 0-9-9m9 9H3m9 9a9 9 0 0 1-9-9m9 9c1.66 0 3-4.03 3-9s-1.34-9-3-9m0 18c-1.66 0-3-4.03-3-9s1.34-9 3-9" /></svg>
+                                                </button>
+                                                <button type="button" class="action-btn delete-btn delete-btn" title="Permanently Delete" data-id="<?= $item['id'] ?>" data-source="<?= $item['source'] ?>" data-title="<?= sanitize($item['name']) ?>">
+                                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg>
+                                                </button>
+                                            <?php else: ?>
+                                                <span class="action-btn disabled" title="File not found">
+                                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10" /><line x1="15" y1="9" x2="9" y2="15" /><line x1="9" y1="9" x2="15" y2="15" /></svg>
+                                                </span>
                                             <?php endif; ?>
-
-
-                                        </div>
-                                        <div class="meta">
-                                            <span>
-                                                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                                    <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
-                                                    <line x1="16" y1="2" x2="16" y2="6" />
-                                                    <line x1="8" y1="2" x2="8" y2="6" />
-                                                    <line x1="3" y1="10" x2="21" y2="10" />
-                                                </svg>
-                                                <?= $uploadDate ?>
-                                            </span>
-                                            <span>
-                                                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
-                                                    <circle cx="12" cy="7" r="4" />
-                                                </svg>
-                                                <?= sanitize($item['uploaded_by'] ?? 'Unknown') ?>
-                                            </span>
                                         </div>
                                     </div>
-                                    <div class="actions">
-                                        <button class="btn btn-sm btn-outline btn-icon view-btn"
-                                            data-id="<?= $item['id'] ?>"
-                                            data-type="<?= $item['source'] ?>"
-                                            data-title="<?= sanitize($item['name']) ?>"
-                                            data-filename="<?= sanitize($item['filename']) ?>"
-                                            title="Preview">
-                                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
-                                                <circle cx="12" cy="12" r="3" />
-                                            </svg>
-                                        </button>
-                                        <?php if ($fileExists): ?>
-                                            <button type="button" class="btn btn-sm btn-success btn-icon restore-btn" title="Restore to active" data-id="<?= $item['id'] ?>" data-source="<?= $item['source'] ?>" data-title="<?= sanitize($item['name']) ?>">
-                                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                                    <path d="M21 12a9 9 0 0 1-9 9m9-9a9 9 0 0 0-9-9m9 9H3m9 9a9 9 0 0 1-9-9m9 9c1.66 0 3-4.03 3-9s-1.34-9-3-9m0 18c-1.66 0-3-4.03-3-9s1.34-9 3-9" />
-                                                </svg>
-                                            </button>
-                                            <button type="button" class="btn btn-sm btn-danger btn-icon delete-btn" title="Permanently Delete" data-id="<?= $item['id'] ?>" data-source="<?= $item['source'] ?>" data-title="<?= sanitize($item['name']) ?>">
-                                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                                    <polyline points="3 6 5 6 21 6" />
-                                                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                                                </svg>
-                                            </button>
-                                        <?php else: ?>
-                                            <span class="btn btn-sm btn-disabled btn-icon" title="File not found">
-                                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                                    <circle cx="12" cy="12" r="10" />
-                                                    <line x1="15" y1="9" x2="9" y2="15" />
-                                                    <line x1="9" y1="9" x2="15" y2="15" />
-                                                </svg>
-                                            </span>
-                                        <?php endif; ?>
-                                    </div>
-                                </div>
-                            <?php endif; ?>
-                        <?php endforeach; ?>
+                                <?php endforeach; ?>
+                            </div>
+                        <?php endif; ?>
+
                     <?php endif; ?>
                 </div>
             </div>
         <?php endif; ?>
-
-    </div> <!-- /repo-section -->
+    </div> 
 </div>
 
-<!-- Restore Confirmation Modal -->
-<div id="restoreModal" class="modal restore-modal">
+<!-- File Info Modal -->
+<div id="fileInfoModal" class="modal">
     <div class="modal-content">
         <div class="modal-header">
             <h3>
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M21 12a9 9 0 0 1-9 9m9-9a9 9 0 0 0-9-9m9 9H3m9 9a9 9 0 0 1-9-9m9 9c1.66 0 3-4.03 3-9s-1.34-9-3-9m0 18c-1.66 0-3-4.03-3-9s1.34-9 3-9" />
-                </svg>
-                Restore Document
+                Document Name
             </h3>
+        </div>
+        <div class="modal-body">
+            <p class="file-info-name" id="fileInfoName"></p>
+            <div style="display: flex; justify-content: flex-end; margin-top: 1.25rem;">
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Restore Confirmation Modal -->
+<div id="restoreModal" class="modal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3>Restore Document</h3>
             <button class="close-btn" data-modal="restoreModal">&times;</button>
         </div>
         <div class="modal-body">
             <p>Restore this document to the active repository?</p>
-            <p style="margin-top: .75rem;"><strong id="restoreDocTitle"></strong></p>
+            <p><strong id="restoreDocTitle"></strong></p>
             <form method="post" action="admin_archive_documents.php" id="restoreForm" style="margin-top: 1.5rem;">
                 <input type="hidden" name="unarchive" id="restore_id">
                 <input type="hidden" name="unarchive_source" id="restore_source" value="document">
                 <input type="hidden" name="dept" value="<?= $filterDept ?>">
                 <input type="hidden" name="folder" value="<?= $selectedFolder ?>">
-                <input type="hidden" name="search" value="<?= htmlspecialchars($search) ?>">
                 <?= csrfField() ?>
                 <div style="display: flex; gap: .75rem; justify-content: flex-end;">
                     <button type="button" class="btn btn-outline" data-modal="restoreModal">Cancel</button>
-                    <button type="submit" class="btn btn-success">Confirm Restore</button>
+                    <button type="submit" class="btn btn-success" style="background:var(--success);color:white;border-color:var(--success)">Confirm Restore</button>
                 </div>
             </form>
         </div>
@@ -1748,30 +978,23 @@ include 'includes/header.php';
 <div id="deleteModal" class="modal">
     <div class="modal-content">
         <div class="modal-header">
-            <h3>
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                </svg>
-                Permanently Delete
-            </h3>
+            <h3>Permanently Delete</h3>
             <button class="close-btn" data-modal="deleteModal">&times;</button>
         </div>
         <div class="modal-body">
             <p>Warning: This will permanently delete the file. This action cannot be undone.</p>
-            <p style="margin-top: .75rem;"><strong id="deleteDocTitle"></strong></p>
+            <p><strong id="deleteDocTitle"></strong></p>
             <form method="post" action="admin_archive_documents.php" id="deleteForm" style="margin-top: 1.5rem;">
                 <input type="hidden" name="delete_id" id="delete_id">
                 <input type="hidden" name="delete_source" id="delete_source" value="document">
                 <input type="hidden" name="dept" value="<?= $filterDept ?>">
                 <input type="hidden" name="folder" value="<?= $selectedFolder ?>">
-                <input type="hidden" name="search" value="<?= htmlspecialchars($search) ?>">
                 <?= csrfField() ?>
                 <label for="deleteAdminPassword" style="display:block;margin-bottom:.4rem;font-size:.82rem;font-weight:600;color:var(--gray-600);">Confirm your admin password</label>
-                <input type="text" name="username" value="<?= sanitize($_SESSION['email'] ?? '') ?>" autocomplete="username" tabindex="-1" hidden>
-                <input type="password" id="deleteAdminPassword" name="admin_password" class="form-control" autocomplete="current-password" required style="margin-bottom:1rem;width:100%;padding:.65rem .85rem;border:1px solid var(--border);border-radius:8px;font-family:inherit;font-size:.875rem;">
+                <input type="password" id="deleteAdminPassword" name="admin_password" autocomplete="current-password" required style="margin-bottom:1rem;width:100%;padding:.65rem .85rem;border:1px solid var(--border);border-radius:8px;font-family:inherit;font-size:.875rem;">
                 <div style="display: flex; gap: .75rem; justify-content: flex-end;">
                     <button type="button" class="btn btn-outline" data-modal="deleteModal">Cancel</button>
-                    <button type="submit" class="btn btn-danger">Confirm Delete</button>
+                    <button type="submit" class="btn btn-danger" style="background:var(--danger);color:white;border-color:var(--danger)">Confirm Delete</button>
                 </div>
             </form>
         </div>
@@ -1784,27 +1007,28 @@ include 'includes/header.php';
     function showArchiveFlash(message, ok) {
         var el = document.createElement('div');
         el.className = ok ? 'alert alert-success archive-flash' : 'alert alert-danger archive-flash';
-        el.setAttribute('role', ok ? 'status' : 'alert');
-        el.setAttribute('aria-live', ok ? 'polite' : 'assertive');
-        var icon = ok ?
-            '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink:0;"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 11 14.01"/></svg>' :
-            '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink:0;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>';
-        el.innerHTML = icon + '<span></span>';
-        el.querySelector('span').textContent = message;
+        el.style.cssText = 'position:fixed;top:20px;left:50%;transform:translateX(-50%);z-index:9999;padding:1rem;border-radius:8px;font-weight:600;' + (ok ? 'background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0;' : 'background:#fef2f2;color:#b91c1c;border:1px solid #fecaca;');
+        el.innerHTML = message;
         document.body.appendChild(el);
-        setTimeout(function() {
-            el.style.transition = 'opacity 0.4s';
-            el.style.opacity = '0';
-            setTimeout(function() {
-                el.remove();
-            }, 400);
-        }, 4000);
+        setTimeout(function() { el.remove(); }, 3500);
     }
+
+    // ---- File card click → show full document name modal ----
+    // Clicks that originate from the action buttons (.file-actions) must NOT
+    // trigger the name-modal, so any click inside .file-actions is ignored.
+    document.querySelectorAll('.file-card').forEach(function(card) {
+        card.addEventListener('click', function(e) {
+            if (e.target.closest('.file-actions')) return;
+            document.getElementById('fileInfoName').textContent = this.dataset.docName || '';
+            document.getElementById('fileInfoModal').classList.add('show');
+        });
+    });
 
     // Delete modal trigger
     document.querySelectorAll('.delete-btn').forEach(function(btn) {
-        btn.addEventListener('click', function() {
-            pendingArchiveItem = this.closest('.content-item');
+        btn.addEventListener('click', function(e) {
+            e.stopPropagation();
+            pendingArchiveItem = this.closest('.file-card');
             document.getElementById('delete_id').value = this.dataset.id;
             document.getElementById('delete_source').value = this.dataset.source || 'document';
             document.getElementById('deleteDocTitle').textContent = this.dataset.title || 'Document';
@@ -1814,14 +1038,20 @@ include 'includes/header.php';
 
     // Restore modal trigger
     document.querySelectorAll('.restore-btn').forEach(function(btn) {
-        btn.addEventListener('click', function() {
-            pendingArchiveItem = this.closest('.content-item');
+        btn.addEventListener('click', function(e) {
+            e.stopPropagation();
+            pendingArchiveItem = this.closest('.file-card');
             document.getElementById('restore_id').value = this.dataset.id;
             document.getElementById('restore_source').value = this.dataset.source || 'document';
             document.getElementById('restoreDocTitle').textContent = this.dataset.title || 'Document';
             document.getElementById('restoreModal').classList.add('show');
         });
     });
+
+    // NOTE: .view-btn / .preview-btn has NO added click handler here.
+    // Whatever existing viewer logic (from header.php / footer.php / shared
+    // JS that listens on .view-btn or data-id/data-type/data-filename) is
+    // left completely untouched and will keep working as before.
 
     function submitArchiveAction(form) {
         var submitBtn = form.querySelector('button[type="submit"]');
@@ -1830,9 +1060,7 @@ include 'includes/header.php';
             method: 'POST',
             body: new URLSearchParams(new FormData(form)),
             credentials: 'same-origin',
-            headers: {
-                'X-Requested-With': 'XMLHttpRequest'
-            }
+            headers: { 'X-Requested-With': 'XMLHttpRequest' }
         }).then(function(r) {
             return r.json();
         }).then(function(d) {
@@ -1843,9 +1071,7 @@ include 'includes/header.php';
                 if (item && item.parentNode) {
                     item.style.transition = 'opacity 0.3s';
                     item.style.opacity = '0';
-                    setTimeout(function() {
-                        item.remove();
-                    }, 250);
+                    setTimeout(function() { item.remove(); }, 250);
                 }
                 showArchiveFlash(d.message || 'Action successful.', true);
             } else {
@@ -1861,26 +1087,25 @@ include 'includes/header.php';
 
     var archiveDeleteForm = document.getElementById('deleteForm');
     var archiveRestoreForm = document.getElementById('restoreForm');
-    if (archiveDeleteForm) archiveDeleteForm.addEventListener('submit', function(e) {
-        e.preventDefault();
-        submitArchiveAction(this);
-    });
-    if (archiveRestoreForm) archiveRestoreForm.addEventListener('submit', function(e) {
-        e.preventDefault();
-        submitArchiveAction(this);
-    });
+    if (archiveDeleteForm) archiveDeleteForm.addEventListener('submit', function(e) { e.preventDefault(); submitArchiveAction(this); });
+    if (archiveRestoreForm) archiveRestoreForm.addEventListener('submit', function(e) { e.preventDefault(); submitArchiveAction(this); });
 
-    // Close modals on X, Cancel button, or background click
     document.querySelectorAll('[data-modal]').forEach(function(btn) {
-        btn.addEventListener('click', function() {
-            document.getElementById(this.dataset.modal).classList.remove('show');
-        });
+        btn.addEventListener('click', function() { document.getElementById(this.dataset.modal).classList.remove('show'); });
     });
-    window.onclick = function(event) {
-        if (event.target.classList.contains('modal')) {
-            event.target.classList.remove('show');
-        }
-    };
+    window.onclick = function(event) { if (event.target.classList.contains('modal')) { event.target.classList.remove('show'); } };
+
+    var __archSuccessTimer = null;
+    function closeArchSuccessToast() {
+        var m = document.getElementById('successModal');
+        m.classList.remove('show');
+        clearTimeout(__archSuccessTimer);
+    }
+    <?php if ($success): ?>
+        document.getElementById('successMsg').textContent = <?= json_encode($success, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_QUOT) ?>;
+        document.getElementById('successModal').classList.add('show');
+        __archSuccessTimer = setTimeout(closeArchSuccessToast, 2600);
+    <?php endif; ?>
 </script>
 
 <div id="successModal" class="modal">
@@ -1900,18 +1125,4 @@ include 'includes/header.php';
         </div>
     </div>
 </div>
-<script nonce="<?= csp_nonce() ?>">
-    var __archSuccessTimer = null;
-
-    function closeArchSuccessToast() {
-        var m = document.getElementById('successModal');
-        m.classList.remove('show');
-        clearTimeout(__archSuccessTimer);
-    }
-    <?php if ($success): ?>
-        document.getElementById('successMsg').textContent = <?= json_encode($success, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_QUOT) ?>;
-        document.getElementById('successModal').classList.add('show');
-        __archSuccessTimer = setTimeout(closeArchSuccessToast, 2600);
-    <?php endif; ?>
-</script>
 <?php include 'includes/footer.php'; ?>

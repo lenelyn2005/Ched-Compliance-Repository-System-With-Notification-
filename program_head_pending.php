@@ -13,10 +13,6 @@ $pendingSubs = array_filter($pendingSubs, function($sub) {
     return !($sub['document_type'] === 'Direct Upload' && empty($sub['teacher_requirement_id']));
 });
 
-// Live queue count refresh (30s poll + WS-triggered). Read-only; role-guarded.
-if (isAjaxRequest() && ($_POST['action'] ?? '') === 'refresh_count') {
-    sendJson(['count' => count($pendingSubs)]);
-}
 
 $pageTitle = 'Pending Reviews';
 $successMsg = isset($_GET['msg']) ? htmlspecialchars($_GET['msg']) : '';
@@ -753,6 +749,9 @@ $extraScripts .= "
             });
         }
     });
+
+    // ponytail: full-page reload (single DB query, nothing to drift); skips reload when any modal is open, 30s interval
+    setInterval(function () { if (!document.querySelector('.modal.show')) location.reload(); }, 30000);
 
 </script>
 ";

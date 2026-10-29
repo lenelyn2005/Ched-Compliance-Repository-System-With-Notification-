@@ -2,6 +2,10 @@
 define('CHED_APP', true);
 require_once 'config.php';
 requireAdmin();
+if (superadmin()) {
+    header('Location: super_admin_audit_trail.php');
+    exit;
+}
 
 // --- Delete All Audit Logs: password confirmation, CSRF & admin authorization ---
 $auditDeleteError = $_SESSION['audit_delete_error'] ?? '';
@@ -98,8 +102,13 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['delete_all_au
             $auditDeleteError = 'Incorrect password. Audit logs were not deleted.';
         } else {
             try {
-                $pdo->exec('DELETE FROM audit_trail');
-                // Re-log the deletion itself so there is an audit trail entry post-purge (optional)
+                // Scope-locked DELETE. The scope is a literal — never read
+                // from the request — so a forged POST cannot widen it.
+                $del = $pdo->prepare("DELETE FROM audit_trail WHERE trail_scope = :scope");
+                $del->execute([':scope' => 'admin']);
+
+                // Re-log this action; logAudit() dual-writes so the Super
+                // Admin archive records that an Admin purged their trail.
                 try { logAudit($pdo, 'delete', 'All audit logs deleted by admin (id: ' . $adminId . ')'); } catch (Exception $e) {}
                 $auditDeleteSuccess = 'All audit logs have been permanently deleted.';
             } catch (Exception $e) {
@@ -135,8 +144,9 @@ $offset = ($page - 1) * $perPage;
 $filterAction = $_GET['action'] ?? '';
 $filterUser = !empty($_GET['user']) ? (int)$_GET['user'] : null;
 
-// Build conditions for WHERE clause
-$conditions = [];
+// Build conditions for WHERE clause.
+// Admin trail sees only admin-scope rows; Super Admin rows are invisible.
+$conditions = ["a.trail_scope = 'admin'"];
 $params = [];
 
 if (!empty($filterAction)) {
@@ -149,14 +159,18 @@ if ($filterUser !== null) {
     $params[] = $filterUser;
 }
 
-// Build WHERE clause
-$where = '';
-if (!empty($conditions)) {
-    $where = 'WHERE ' . implode(' AND ', $conditions);
-}
+// Admin trail only displays admin/department/unit_head activities (incl. system entries).
+$conditions[] = "(u.role IN ('admin', 'super_admin', 'department', 'unit_head') OR u.id IS NULL)";
 
-// Count total rows for pagination
-$totalQuery = $pdo->prepare("SELECT COUNT(*) FROM audit_trail a $where");
+// Build WHERE clause
+$where = 'WHERE ' . implode(' AND ', $conditions);
+
+// Count total rows for pagination.
+// Join users because the role filter lives there (pre-existing bug fix:
+// the original count query omitted the join, so role filters did nothing).
+$totalQuery = $pdo->prepare(
+    "SELECT COUNT(*) FROM audit_trail a LEFT JOIN users u ON a.user_id = u.id $where"
+);
 $totalQuery->execute($params);
 $totalRows = (int)$totalQuery->fetchColumn();
 $totalPages = max(1, ceil($totalRows / $perPage));
@@ -167,22 +181,15 @@ $sql = "
     FROM audit_trail a
     LEFT JOIN users u ON a.user_id = u.id
     $where
+    ORDER BY a.created_at DESC
+    LIMIT $perPage OFFSET $offset
 ";
-
-// Add filter for user roles or system entries
-if (!empty($where)) {
-    $sql .= " AND (u.role IN ('admin', 'department', 'unit_head') OR u.id IS NULL)";
-} else {
-    $sql .= " WHERE (u.role IN ('admin', 'department', 'unit_head') OR u.id IS NULL)";
-}
-
-$sql .= " ORDER BY a.created_at DESC LIMIT $perPage OFFSET $offset";
 
 $logs = $pdo->prepare($sql);
 $logs->execute($params);
 $logs = $logs->fetchAll();
 
-$allUsers = $pdo->query("SELECT id, name FROM users WHERE role IN ('admin', 'department', 'unit_head') ORDER BY name")->fetchAll();
+$allUsers = $pdo->query("SELECT id, name FROM users WHERE role IN ('admin', 'super_admin', 'department', 'unit_head') ORDER BY name")->fetchAll();
 
 $pageTitle = 'Audit Trail';
 
@@ -913,7 +920,6 @@ document.addEventListener('DOMContentLoaded', function() {
         if (e) e.preventDefault();
         if (!passwordModal) return;
         if (openBtn && openBtn.hasAttribute('disabled')) return;
-        // ensure final modal is hidden
         if (finalModal) { finalModal.classList.remove('show'); finalModal.setAttribute('aria-hidden','true'); }
         passwordModal.classList.add('show');
         passwordModal.setAttribute('aria-hidden', 'false');
@@ -973,8 +979,6 @@ document.addEventListener('DOMContentLoaded', function() {
     if (cancelBtn) cancelBtn.addEventListener('click', closePasswordModal);
     if (finalCancelBtn) finalCancelBtn.addEventListener('click', function() {
         closeFinalModal();
-        // Return to password modal so user can correct password if needed
-        // Keep pending data but allow user to retry
     });
 
     document.addEventListener('keydown', function(e) {
@@ -997,8 +1001,6 @@ document.addEventListener('DOMContentLoaded', function() {
                 if (passwordInput) passwordInput.focus();
                 return;
             }
-            // Require the currently logged-in Admin to enter and verify their correct account password
-            // Verify password server-side BEFORE proceeding to final confirmation
             const csrfToken = form.querySelector('input[name="csrf_token"]')?.value || '';
             const verifyData = new FormData();
             verifyData.append('verify_admin_password', '1');
@@ -1018,12 +1020,10 @@ document.addEventListener('DOMContentLoaded', function() {
             .then(({ok, data}) => {
                 if (continueBtn) { continueBtn.disabled = false; continueBtn.textContent = originalContinueText; }
                 if (data && data.success) {
-                    // Password is correct - only then proceed to final confirmation
                     pendingFormData = new FormData(form);
                     closePasswordModal();
                     openFinalModal();
                 } else {
-                    // If the password is incorrect, cancel the deletion and show an error message
                     const msg = (data && data.error) ? data.error : 'Incorrect password. Audit logs were not deleted.';
                     showPasswordError(msg);
                 }
@@ -1056,10 +1056,8 @@ document.addEventListener('DOMContentLoaded', function() {
             .then(({ok, data}) => {
                 if (data && data.success) {
                     closeFinalModal();
-                    // After successful deletion, refresh the audit log and show a success message
                     window.location.reload();
                 } else {
-                    // If incorrect, do not delete anything and show an error
                     const msg = (data && data.error) ? data.error : 'Failed to delete audit logs.';
                     showFinalError(msg);
                     finalConfirmBtn.disabled = false;
@@ -1081,5 +1079,3 @@ $extraScripts = ob_get_clean();
 
 <?php $toastMsg = $auditDeleteSuccess ?? ''; include 'includes/success_toast.php'; ?>
 <?php include 'includes/footer.php'; ?>
-
-

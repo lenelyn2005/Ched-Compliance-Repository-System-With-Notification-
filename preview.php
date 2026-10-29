@@ -1,8 +1,9 @@
 <?php
 
-define('CHED_APP', true);
+if (!defined('CHED_APP')) define('CHED_APP', true);
 require_once 'config.php';
-require_once 'vendor/autoload.php';
+require_once __DIR__ . '/includes/measure_baseline.php';
+require_once __DIR__ . '/vendor/autoload.php';
 
 use PhpOffice\PhpWord\IOFactory as WordFactory;
 use PhpOffice\PhpSpreadsheet\IOFactory as SpreadsheetFactory;
@@ -32,11 +33,20 @@ set_time_limit(300);
 ini_set('memory_limit', '512M');
 
 // Helper to determine cache path
+// Keyed on the DB-relative document path only: an r2 object has no local file,
+// so mtime cannot participate. The relative path is stable across drivers and
+// unique per document, and a re-upload writes a new canonical filename, which
+// yields a fresh key just like the old mtime-based one did.
+// ponytail: a same-path overwrite would keep a stale preview; switch the key to
+// file_hash when that ever becomes possible.
 function getCachePath($filePath, $type) {
     $cacheDir = getPreviewCacheDir();
-    $key = md5($filePath . filemtime($filePath));
+    $key = md5((string) $filePath);
     return $cacheDir . "{$key}_{$type}.html";
 }
+
+$corr = 'p_' . uniqid();
+$t0 = microtime(true);
 
 // Fetch document record
 $id = isset($_GET['id']) ? (int) $_GET['id'] : 0;
@@ -186,9 +196,17 @@ if ($download) {
         die('Access denied');
     }
     
-    $file_path = securePath($file['file_path']);
-    if (!$file_path) { http_response_code(404); die('File not found or unreadable'); }
-    if (!is_readable($file_path)) { http_response_code(404); die('File not readable'); }
+    $relPath = (string) $file['file_path'];
+    // Only genuine absence is a 404; a storage outage is a 503, never a silent
+    // "file not found" (plan §9).
+    try {
+        $fileSize = storageObjectSize($relPath);
+    } catch (StorageException $e) {
+        http_response_code(503);
+        error_log('[CHED] preview download blocked, storage unavailable: ' . get_class($e));
+        die('Storage temporarily unavailable. Please try again.');
+    }
+    if ($fileSize === null) { http_response_code(404); die('File not found or unreadable'); }
     
     $ext = strtolower(pathinfo($file['filename'], PATHINFO_EXTENSION));
     $mimeTypes = [
@@ -211,8 +229,8 @@ if ($download) {
     $mimeType = $mimeTypes[$ext] ?? 'application/octet-stream';
     header('Content-Type: ' . $mimeType);
     header('Content-Disposition: attachment; filename="' . rawurlencode($file['filename']) . '"');
-    header('Content-Length: ' . filesize($file_path));
-    readfile($file_path);
+    header('Content-Length: ' . $fileSize);
+    storageEmitBody($relPath);
     exit;
 }
 
@@ -244,6 +262,7 @@ switch ($source) {
 }
 
 if (!$file) {
+    measure_stage($corr, 'db_fetch', $t0, microtime(true));
     http_response_code(404);
     die('Document not found');
 }
@@ -342,15 +361,15 @@ if ($source === 'ph_repository' && $role !== 'admin' && $hasAccess) {
 }
 
 if (!$hasAccess) {
+    measure_stage($corr, 'auth', $t0, microtime(true));
     http_response_code(403);
     die('Access denied');
 }
 
-$file_path = securePath($file['file_path']);
-if (!$file_path || !is_readable($file_path)) {
-    http_response_code(404);
-    die('File not found or unreadable');
-}
+$relPath = (string) $file['file_path'];
+// shortcut: removed separate R2 HEAD here; stream/stage operations confirm presence.
+$t_r2 = microtime(true);
+measure_stage($corr, 'r2_bypass', $t_r2, microtime(true));
 
 $ext = strtolower(pathinfo($file['filename'], PATHINFO_EXTENSION));
 if (empty($ext) && !empty($file['file_path'])) {
@@ -371,11 +390,17 @@ if (in_array($ext, ['pdf', 'jpg', 'jpeg', 'png', 'gif', 'webp'])) {
     while (ob_get_level()) ob_end_clean();
     header('Content-Type: ' . $mime);
     header('Content-Disposition: inline; filename="' . rawurlencode($file['filename']) . '"');
-    header('Content-Length: ' . filesize($file_path));
+    // shortcut: Content-Length omitted to eliminate duplicate R2 HEAD.
     header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
     header('Pragma: no-cache');
     header('Expires: 0');
-    readfile($file_path);
+    try {
+        storageEmitBody($relPath);
+    } catch (StorageException $e) {
+        http_response_code(404);
+        error_log('[CHED] preview blocked, storage unavailable: ' . get_class($e));
+        die('File not found or unreadable');
+    }
     exit;
 }
 
@@ -404,22 +429,37 @@ if (in_array($ext, ['doc', 'docx', 'docs'])) {
                     <h2>Preview Not Available</h2>
                     <p>Word document preview requires the ZIP extension to be enabled on the server.</p>
                     <p>Please contact your system administrator to enable the php_zip extension.</p>
-                    <a href="preview.php?id=' . $id . '&source=' . $source . '&download=1" class="btn">Download Document</a>
+                    <a href="download_document.php?id=' . (int)$id . '&source=' . htmlspecialchars($source) . '" class="btn" download>Download Document</a>
                 </div>
             </body>
             </html>';
         exit;
     }
     
-    $cachePath = getCachePath($file_path, 'word');
+    $cachePath = getCachePath($relPath, 'word');
     if (file_exists($cachePath)) {
         header('Content-Type: text/html; charset=utf-8');
         readfile($cachePath);
         exit;
     }
 
+    // Minimal loading indicator while conversion prepares.
+    echo '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Loading preview...</title><style>body{font-family:sans-serif;text-align:center;padding:60px;background:#f5f5f5;color:#555;}h2{color:#2563eb;}</style></head><body><h2>Preparing preview...</h2><p>Please wait while the document is being converted.</p></body></html>';
+    flush();
+
+    // PhpOffice only reads local files: stage a temp copy of the object and
+    // always remove it afterwards (plan §6.1).
     try {
-        $phpWord = WordFactory::load($file_path);
+        $staged = storageStageLocalCopy($relPath, '.' . $ext); // StorageObjectNotFound → null below
+    } catch (StorageException $e) {
+        error_log('[CHED] preview stage blocked, storage unavailable: ' . get_class($e));
+        http_response_code(503);
+        die('Storage temporarily unavailable. Please try again.');
+    }
+    if ($staged === null) { http_response_code(404); die('File not found or unreadable'); }
+
+    try {
+        $phpWord = WordFactory::load($staged);
         $htmlWriter = new \PhpOffice\PhpWord\Writer\HTML($phpWord);
         ob_start();
         $htmlWriter->save('php://output');
@@ -469,7 +509,7 @@ if (in_array($ext, ['doc', 'docx', 'docs'])) {
                 </style>
             </head>
             <body>
-                <div class="document-container">' . $html . '</div>
+                <div class="document-container">' . sanitizeDocumentHtml($html) . '</div>
             </body>
             </html>';
 
@@ -482,7 +522,7 @@ if (in_array($ext, ['doc', 'docx', 'docs'])) {
     } catch (Exception $e) {
         error_log("Word conversion error: " . $e->getMessage());
         header('Content-Type: text/html; charset=utf-8');
-        $downloadUrl = "preview.php?id={$id}&source={$source}&download=1";
+        $downloadUrl = 'download_document.php?id=' . (int)$id . '&source=' . htmlspecialchars($source);
         echo '<!DOCTYPE html>
             <html>
             <head>
@@ -506,6 +546,8 @@ if (in_array($ext, ['doc', 'docx', 'docs'])) {
             </body>
             </html>';
         exit;
+    } finally {
+        @unlink($staged);
     }
 }
 
@@ -534,22 +576,37 @@ if (in_array($ext, ['xls', 'xlsx'])) {
                     <h2>Preview Not Available</h2>
                     <p>Excel document preview requires the ZIP extension to be enabled on the server.</p>
                     <p>Please contact your system administrator to enable the php_zip extension.</p>
-                    <a href="preview.php?id=' . $id . '&source=' . $source . '&download=1" class="btn">Download Document</a>
+                    <a href="download_document.php?id=' . (int)$id . '&source=' . htmlspecialchars($source) . '" class="btn" download>Download Document</a>
                 </div>
             </body>
             </html>';
         exit;
     }
     
-    $cachePath = getCachePath($file_path, 'excel');
+    $cachePath = getCachePath($relPath, 'excel');
     if (file_exists($cachePath)) {
         header('Content-Type: text/html; charset=utf-8');
         readfile($cachePath);
         exit;
     }
 
+    // Minimal loading indicator while conversion prepares.
+    echo '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Loading preview...</title><style>body{font-family:sans-serif;text-align:center;padding:60px;background:#f5f5f5;color:#555;}h2{color:#2563eb;}</style></head><body><h2>Preparing preview...</h2><p>Please wait while the document is being converted.</p></body></html>';
+    flush();
+
+    // PhpOffice only reads local files: stage a temp copy of the object and
+    // always remove it afterwards (plan §6.1).
     try {
-        $spreadsheet = SpreadsheetFactory::load($file_path);
+        $staged = storageStageLocalCopy($relPath, '.' . $ext); // StorageObjectNotFound → null below
+    } catch (StorageException $e) {
+        error_log('[CHED] preview stage blocked, storage unavailable: ' . get_class($e));
+        http_response_code(503);
+        die('Storage temporarily unavailable. Please try again.');
+    }
+    if ($staged === null) { http_response_code(404); die('File not found or unreadable'); }
+
+    try {
+        $spreadsheet = SpreadsheetFactory::load($staged);
         $htmlWriter = new \PhpOffice\PhpSpreadsheet\Writer\Html($spreadsheet);
         ob_start();
         $htmlWriter->save('php://output');
@@ -593,7 +650,7 @@ if (in_array($ext, ['xls', 'xlsx'])) {
                 </style>
             </head>
             <body>
-                <div class="excel-container">' . $html . '</div>
+                <div class="excel-container">' . sanitizeDocumentHtml($html) . '</div>
             </body>
             </html>';
 
@@ -605,7 +662,7 @@ if (in_array($ext, ['xls', 'xlsx'])) {
     } catch (Exception $e) {
         error_log("Excel conversion error: " . $e->getMessage());
         header('Content-Type: text/html; charset=utf-8');
-        $downloadUrl = "preview.php?id={$id}&source={$source}&download=1";
+        $downloadUrl = 'download_document.php?id=' . (int)$id . '&source=' . htmlspecialchars($source);
         echo '<!DOCTYPE html>
             <html>
             <head>
@@ -629,6 +686,8 @@ if (in_array($ext, ['xls', 'xlsx'])) {
             </body>
             </html>';
         exit;
+    } finally {
+        @unlink($staged);
     }
 }
 
@@ -656,7 +715,7 @@ if (in_array($ext, ['ppt', 'pptx'])) {
                     <h2>Preview Not Available</h2>
                     <p>PowerPoint preview requires the ZIP extension to be enabled on the server.</p>
                     <p>Please contact your system administrator to enable the php_zip extension.</p>
-                    <a href="preview.php?id=' . $id . '&source=' . $source . '&download=1" class="btn">Download Document</a>
+                    <a href="download_document.php?id=' . (int)$id . '&source=' . htmlspecialchars($source) . '" class="btn" download>Download Document</a>
                 </div>
             </body>
             </html>';
@@ -665,7 +724,7 @@ if (in_array($ext, ['ppt', 'pptx'])) {
 
     // Use .pdf extension for PowerPoint cache
     $cacheDir = getPreviewCacheDir();
-    $cacheKey = md5($file_path . filemtime($file_path));
+    $cacheKey = md5($relPath);
     $cachePath = $cacheDir . "{$cacheKey}_ppt.pdf";
     
     if (file_exists($cachePath)) {
@@ -677,8 +736,23 @@ if (in_array($ext, ['ppt', 'pptx'])) {
         exit;
     }
 
+    // Minimal loading indicator while conversion prepares.
+    echo '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Loading preview...</title><style>body{font-family:sans-serif;text-align:center;padding:60px;background:#f5f5f5;color:#555;}h2{color:#2563eb;}</style></head><body><h2>Preparing preview...</h2><p>Please wait while the document is being converted.</p></body></html>';
+    flush();
+
+    // PhpOffice only reads local files: stage a temp copy of the object and
+    // always remove it afterwards (plan §6.1).
     try {
-        $presentation = PresentationFactory::load($file_path);
+        $staged = storageStageLocalCopy($relPath, '.' . $ext); // StorageObjectNotFound → null below
+    } catch (StorageException $e) {
+        error_log('[CHED] preview stage blocked, storage unavailable: ' . get_class($e));
+        http_response_code(503);
+        die('Storage temporarily unavailable. Please try again.');
+    }
+    if ($staged === null) { http_response_code(404); die('File not found or unreadable'); }
+
+    try {
+        $presentation = PresentationFactory::load($staged);
         
         // Use PDF adapter for better rendering
         $pdfWriter = new PresentationPdfWriter($presentation);
@@ -695,7 +769,7 @@ if (in_array($ext, ['ppt', 'pptx'])) {
     } catch (Exception $e) {
         error_log("PowerPoint conversion error: " . $e->getMessage());
         header('Content-Type: text/html; charset=utf-8');
-        $downloadUrl = "preview.php?id={$id}&source={$source}&download=1";
+        $downloadUrl = 'download_document.php?id=' . (int)$id . '&source=' . htmlspecialchars($source);
         echo '<!DOCTYPE html>
             <html>
             <head>
@@ -719,13 +793,15 @@ if (in_array($ext, ['ppt', 'pptx'])) {
             </body>
             </html>';
         exit;
+    } finally {
+        @unlink($staged);
     }
 }
 
 // ---------- Unsupported Format ----------
 header('Content-Type: text/html; charset=utf-8');
 http_response_code(415);
-$downloadUrl = "preview.php?id={$id}&source={$source}&download=1";
+$downloadUrl = 'download_document.php?id=' . (int)$id . '&source=' . htmlspecialchars($source);
 echo '<!DOCTYPE html>
 <html>
 <head>

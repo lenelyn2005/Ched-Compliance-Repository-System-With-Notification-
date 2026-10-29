@@ -78,6 +78,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['delete'])) {
         if ($stmt->fetch()) {
             $error = 'Email already in use.';
         } else {
+            // Name uniqueness is case-insensitive and ignores stray spaces.
+            $stmt = $pdo->prepare('SELECT id FROM users WHERE LOWER(TRIM(name)) = LOWER(TRIM(?)) AND id != ?');
+            $stmt->execute([$name, $id ?? 0]);
+            if ($stmt->fetch()) {
+                $error = 'Full name already in use.';
+            } else {
             try {
                 if ($id) {
                     if (!empty($password)) {
@@ -110,8 +116,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['delete'])) {
                     }
                 } else {
                     // Create
-                    $stmt = $pdo->prepare('INSERT INTO users (name, email, password, role, department_id, program_head_id) VALUES (?, ?, ?, ?, ?, ?)');
-                    $stmt->execute([$name, $email, password_hash($password, PASSWORD_DEFAULT), $role, $deptId, $phId]);
+                    // created_by mirrors program_head_id so every branch hangs off one column
+                    // the Super Admin cascade can walk.
+                    $stmt = $pdo->prepare('INSERT INTO users (name, email, password, role, department_id, program_head_id, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)');
+                    $stmt->execute([$name, $email, password_hash($password, PASSWORD_DEFAULT), $role, $deptId, $phId, $phId]);
                     $newId = (int)$pdo->lastInsertId();
                     logAudit($pdo, 'create_teacher', "$roleText created by " . phRoleShort() . ": $email", 'user', $newId);
 
@@ -123,6 +131,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['delete'])) {
             } catch (PDOException $e) {
                 error_log('[CHED] faculty save failed: ' . $e->getMessage());
                 $error = 'Database error. Please try again.';
+            }
             }
         }
     }

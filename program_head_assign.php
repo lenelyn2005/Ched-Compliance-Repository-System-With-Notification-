@@ -50,26 +50,6 @@ $deadline = !empty($_POST['deadline']) ? $_POST['deadline'] : null;
 
         $reqIdsInt = array_values(array_map('intval', $reqIds));
 
-        // Cross-department guard: both the faculty and the requirements must
-        // belong to this Program Head's department — forged ids from other
-        // departments are dropped (same pattern as program_head_dashboard.php).
-        $teacherIds = array_values(array_map('intval', (array) $teacherIds));
-        if ($teacherIds) {
-            $tPh = implode(',', array_fill(0, count($teacherIds), '?'));
-            $tOk = $pdo->prepare("SELECT id FROM users WHERE role IN ('teacher','staff') AND department_id = ? AND id IN ($tPh)");
-            $tOk->execute(array_merge([$deptId], $teacherIds));
-            $teacherIds = array_map('intval', array_column($tOk->fetchAll(), 'id'));
-        }
-        if ($reqIdsInt) {
-            $rPh = implode(',', array_fill(0, count($reqIdsInt), '?'));
-            $rOk = $pdo->prepare("SELECT id FROM department_requirements WHERE department_id = ? AND id IN ($rPh)");
-            $rOk->execute(array_merge([$deptId], $reqIdsInt));
-            $reqIdsInt = array_map('intval', array_column($rOk->fetchAll(), 'id'));
-        }
-        if (!$teacherIds || !$reqIdsInt) {
-            $error = 'Selection includes faculty or requirements outside your department.';
-        }
-
         // Preload requirement info for post-commit notifications
         $reqInfoMap = [];
         if ($reqIdsInt) {
@@ -722,7 +702,7 @@ include 'includes/header.php';
         color: var(--gray-700);
         display: inline-flex;
         align-items: center;
-        gap: 0.35rem
+        gap: 0.35rem;
     }
     .folder-filter label svg {
         color: var(--gray-400);

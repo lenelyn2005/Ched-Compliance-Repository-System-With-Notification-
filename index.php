@@ -2,11 +2,13 @@
 define('CHED_APP', true);
 require_once 'config.php';
 
-// Redirect based on role
 if (isset($_SESSION['role'])) {
     switch ($_SESSION['role']) {
         case 'admin':
             header('Location: admin_dashboard.php');
+            break;
+        case 'super_admin':
+            header('Location: super_admin_dashboard.php');
             break;
         case 'department':
         case 'unit_head':

@@ -48,53 +48,85 @@ function getAnalyticsData($filters = [])
         FROM ph_documents GROUP BY COALESCE(teacher_ph_requirement_id, id)
     ) lv ON COALESCE(pd.teacher_ph_requirement_id, pd.id) = lv.grp AND pd.version = lv.mv";
 
-    $totalDocs = (int) $pdo->query("SELECT COUNT(*) FROM ($docWindow) d WHERE d.archived = 0 AND $dateDocFull AND $deptCondition")->fetchColumn();
-    $totalPhDocs = (int) $pdo->query("SELECT COUNT(*) FROM ($phWindow) pd WHERE pd.archived = 0 AND $datePhFull")->fetchColumn();
+    $stmt = $pdo->prepare("SELECT COUNT(*) FROM ($docWindow) d WHERE d.archived = 0 AND $dateDocFull AND $deptCondition");
+    $stmt->execute($deptParams);
+    $totalDocs = (int) $stmt->fetchColumn();
+
+    $stmtPh = $pdo->prepare("SELECT COUNT(*) FROM ($phWindow) pd WHERE pd.archived = 0 AND $datePhFull");
+    $stmtPh->execute();
+    $totalPhDocs = (int) $stmtPh->fetchColumn();
     $totalAllActive = $totalDocs + $totalPhDocs;
 
     // Total Documents KPI = what admin_manage_document.php holds: approved, not archived.
-    $repoDocs = (int) $pdo->query("SELECT COUNT(*) FROM ($docWindow) d
+    $stmtRepo = $pdo->prepare("SELECT COUNT(*) FROM ($docWindow) d
         WHERE d.archived = 0 AND d.status = 'approved_admin'
-          AND $dateDocFull AND $deptCondition")->fetchColumn();
-    $repoPhDocs = (int) $pdo->query("SELECT COUNT(*) FROM ($phWindow) pd
+          AND $dateDocFull AND $deptCondition");
+    $stmtRepo->execute($deptParams);
+    $repoDocs = (int) $stmtRepo->fetchColumn();
+
+    $stmtRepoPh = $pdo->prepare("SELECT COUNT(*) FROM ($phWindow) pd
         WHERE pd.archived = 0 AND pd.status = 'approved_admin'
-          AND $datePhFull")->fetchColumn();
+          AND $datePhFull");
+    $stmtRepoPh->execute();
+    $repoPhDocs = (int) $stmtRepoPh->fetchColumn();
     $repoTotal = $repoDocs + $repoPhDocs;
 
-    $archivedDocs = (int) $pdo->query("SELECT COUNT(*) FROM documents d WHERE " . archivedDocCondition() . " AND $dateDocFull AND $deptCondition")->fetchColumn();
-    $archivedPh = (int) $pdo->query("SELECT COUNT(*) FROM ph_documents pd WHERE pd.archived = 1 AND pd.status = 'approved_admin' AND $datePhFull")->fetchColumn();
+    $stmtArc = $pdo->prepare("SELECT COUNT(*) FROM documents d WHERE " . archivedDocCondition() . " AND $dateDocFull AND $deptCondition");
+    $stmtArc->execute($deptParams);
+    $archivedDocs = (int) $stmtArc->fetchColumn();
+
+    $stmtArcPh = $pdo->prepare("SELECT COUNT(*) FROM ph_documents pd WHERE pd.archived = 1 AND pd.status = 'approved_admin' AND $datePhFull");
+    $stmtArcPh->execute();
+    $archivedPh = (int) $stmtArcPh->fetchColumn();
     $archived = $archivedDocs + $archivedPh;
 
-    $pendingDocs = (int) $pdo->query("SELECT COUNT(*) FROM ($docWindow) d
+    $stmtPend1 = $pdo->prepare("SELECT COUNT(*) FROM ($docWindow) d
         WHERE d.archived = 0 AND d.status = 'pending_admin'
           AND d.file_path IS NOT NULL AND d.file_path != ''
-          AND $dateDocFull AND $deptCondition")->fetchColumn();
-    $pendingDocs += (int) $pdo->query("SELECT COUNT(*) FROM ($docWindow) d
+          AND $dateDocFull AND $deptCondition");
+    $stmtPend1->execute($deptParams);
+    $pendingDocs = (int) $stmtPend1->fetchColumn();
+
+    $stmtPend2 = $pdo->prepare("SELECT COUNT(*) FROM ($docWindow) d
         LEFT JOIN teacher_requirements tr ON d.teacher_requirement_id = tr.id
         WHERE d.archived = 0 AND d.status = 'pending_program_head'
           AND d.teacher_requirement_id IS NOT NULL
           AND COALESCE(tr.requirement_type, 'admin_requirement') = 'admin_requirement'
           AND d.file_path IS NOT NULL AND d.file_path != ''
-          AND $dateDocFull AND $deptCondition")->fetchColumn();
+          AND $dateDocFull AND $deptCondition");
+    $stmtPend2->execute($deptParams);
+    $pendingDocs += (int) $stmtPend2->fetchColumn();
     $pending = $pendingDocs;
 
     // Approved/Rejected = decisions made in admin_submissions.php (adminReview /
     // adminReviewPH), so PH-side statuses (approved_program_head,
     // rejected_program_head) are not counted.
-    $approvedDocs = (int) $pdo->query("SELECT COUNT(*) FROM ($docWindow) d
-        WHERE d.status = 'approved_admin' AND $dateDocFull AND $deptCondition")->fetchColumn();
-    $approvedPh = (int) $pdo->query("SELECT COUNT(*) FROM ($phWindow) pd
-        WHERE pd.status = 'approved_admin' AND $datePhFull")->fetchColumn();
+    $stmtApp = $pdo->prepare("SELECT COUNT(*) FROM ($docWindow) d
+        WHERE d.status = 'approved_admin' AND $dateDocFull AND $deptCondition");
+    $stmtApp->execute($deptParams);
+    $approvedDocs = (int) $stmtApp->fetchColumn();
+
+    $stmtAppPh = $pdo->prepare("SELECT COUNT(*) FROM ($phWindow) pd
+        WHERE pd.status = 'approved_admin' AND $datePhFull");
+    $stmtAppPh->execute();
+    $approvedPh = (int) $stmtAppPh->fetchColumn();
     $approved = $approvedDocs + $approvedPh;
 
-    $approvedActive = (int) $pdo->query("SELECT COUNT(*) FROM ($docWindow) d
-        WHERE d.archived = 0 AND d.status = 'approved_admin' AND $dateDocFull AND $deptCondition")->fetchColumn();
+    $stmtAppAct = $pdo->prepare("SELECT COUNT(*) FROM ($docWindow) d
+        WHERE d.archived = 0 AND d.status = 'approved_admin' AND $dateDocFull AND $deptCondition");
+    $stmtAppAct->execute($deptParams);
+    $approvedActive = (int) $stmtAppAct->fetchColumn();
 
-    $rejectedDocs = (int) $pdo->query("SELECT COUNT(*) FROM ($docWindow) d
+    $stmtRej = $pdo->prepare("SELECT COUNT(*) FROM ($docWindow) d
         WHERE d.archived = 0 AND d.status IN ('rejected_admin','rejected_program_head')
-          AND $dateDocFull AND $deptCondition")->fetchColumn();
-    $rejectedPh = (int) $pdo->query("SELECT COUNT(*) FROM ($phWindow) pd
-        WHERE pd.archived = 0 AND pd.status IN ('rejected_admin','rejected_program_head') AND $datePhFull")->fetchColumn();
+          AND $dateDocFull AND $deptCondition");
+    $stmtRej->execute($deptParams);
+    $rejectedDocs = (int) $stmtRej->fetchColumn();
+
+    $stmtRejPh = $pdo->prepare("SELECT COUNT(*) FROM ($phWindow) pd
+        WHERE pd.archived = 0 AND pd.status IN ('rejected_admin','rejected_program_head') AND $datePhFull");
+    $stmtRejPh->execute();
+    $rejectedPh = (int) $stmtRejPh->fetchColumn();
     $rejected = $rejectedDocs + $rejectedPh;
 
     $totalUsers = (int) $pdo->query("SELECT COUNT(*) FROM users")->fetchColumn();
@@ -199,7 +231,9 @@ function getAnalyticsData($filters = [])
         $sqlDept .= " AND $dateDocPerf";
     }
     $sqlDept .= " GROUP BY d.id ORDER BY d.department_name";
-    $deptRows = $pdo->query($sqlDept)->fetchAll(PDO::FETCH_ASSOC);
+    $stmtDeptPerf = $pdo->prepare($sqlDept);
+    $stmtDeptPerf->execute($deptParams);
+    $deptRows = $stmtDeptPerf->fetchAll(PDO::FETCH_ASSOC);
     $deptPerformance = [];
     foreach ($deptRows as $dept) {
         $total = (int) $dept['total_docs'];
@@ -1548,7 +1582,7 @@ include 'includes/header.php';
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                     </svg></div>
                 <div class="alert-card-info">
-                    <h3>Expiring ≤<?= EXPIRY_WARNING_DAYS ?>d</h3>
+                    <h3>Expiring</h3>
                     <div class="alert-card-number warning" id="exp_total"><?= $expiringTotal ?></div>
                 </div>
             </div>

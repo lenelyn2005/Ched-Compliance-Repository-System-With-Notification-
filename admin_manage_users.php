@@ -114,6 +114,11 @@ if (isset($_GET['msg'])) {
         $stmt->execute([$email, $id ?? 0]);
         $emailTaken = (bool)$stmt->fetch();
 
+        // --- Name uniqueness check (case-insensitive, trimmed) ---
+        $stmt = $pdo->prepare('SELECT id FROM users WHERE LOWER(TRIM(name)) = LOWER(TRIM(?)) AND id != ?');
+        $stmt->execute([$name, $id ?? 0]);
+        $nameTaken = (bool)$stmt->fetch();
+
         // --- One-user-per-department uniqueness check (server-side enforcement) ---
         // Rejects even manually crafted POSTs. When editing, the user's own current
         // department assignment is allowed (id != self is excluded).
@@ -126,6 +131,8 @@ if (isset($_GET['msg'])) {
 
         if ($emailTaken) {
             $error = 'Email already in use.';
+        } elseif ($nameTaken) {
+            $error = 'Full name already in use.';
         } elseif ($deptTaken) {
             $error = 'This department already has an assigned user.';
         } else {
@@ -166,9 +173,11 @@ if (isset($_GET['msg'])) {
                     logAudit($pdo, 'edit', "User updated: $email", 'user', $id);
                     $success = 'User updated successfully.';
                 } else {
-                    $pdo->prepare('INSERT INTO users (name, email, password, role, department_id) VALUES (?, ?, ?, ?, ?)')
-                        ->execute([$name, $email, password_hash($password, PASSWORD_DEFAULT), $role, $departmentId ?: null]);
-                    $newId = (int)$pdo->lastInsertId();
+                    // created_by ties the new account to the creating Admin so the Super Admin
+                    // cascade can switch this whole branch off with the Admin.
+                    $pdo->prepare('INSERT INTO users (name, email, password, role, department_id, created_by) VALUES (?, ?, ?, ?, ?, ?)')
+                        ->execute([$name, $email, password_hash($password, PASSWORD_DEFAULT), $role, $departmentId ?: null, (int) $_SESSION['user_id']]);
+                    $newId = (int) $pdo->lastInsertId();
                     logAudit($pdo, 'create', "User created: $email (role: $role)", 'user', $newId);
 
                     // Send Welcome Notification & Email
@@ -551,7 +560,7 @@ include 'includes/header.php';
 ?>
 <div class="umu-wrap">
 <?php if ($error && !$deleteModalError): ?>
-<div class="umu-alert umu-alert-danger" role="alert" aria-live="assertive">
+<div id="umuTopError" class="umu-alert umu-alert-danger" role="alert" aria-live="assertive">
     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
     <span><?= sanitize($error) ?></span>
 </div>
@@ -601,7 +610,7 @@ include 'includes/header.php';
                     </div>
 
                     <div id="umuDeptField">
-                        <label class="umu-label" for="umu-dept">Department access <span class="umu-hint">(optional — can be updated later)</span></label>
+                        <label class="umu-label" for="umu-dept">Department access</label>
                         <select name="department_id" id="umu-dept" class="umu-input">
                             <option value="">-- Select department --</option>
                             <?php foreach ($departments as $d):
@@ -677,7 +686,7 @@ include 'includes/header.php';
                                 if ($initials === '') $initials = strtoupper(substr($u['name'], 0, 1));
                                 $roleName = phRoleName($u['role']);
                             ?>
-                        <tr data-role="<?= sanitize($u['role']) ?>" data-search="<?= sanitize($u['name'] . ' ' . $u['email'] . ' ' . ($u['department_name'] ?? '') . ' ' . $roleName) ?>">
+                        <tr data-role="<?= sanitize($u['role']) ?>" data-search="<?= sanitize($u['name'] . ' ' . $u['email'] . ' ' . ($u['department_name'] ?? '') . ' ' . $roleName) ?>" data-row-id="user:<?= (int)$u['id'] ?>">
                                 <td>
                                     <div class="umu-user">
                                         <div class="umu-avatar dept" aria-hidden="true"><?= $initials ?></div>
@@ -781,6 +790,9 @@ include 'includes/header.php';
         document.getElementById('successModal').classList.add('active');
         document.getElementById('successModal').setAttribute('aria-hidden', 'false');
         __umuSuccessTimer = setTimeout(closeUserSuccessToast, 2600);
+    <?php endif; ?>
+    <?php if ($error && !$deleteModalError): ?>
+        setTimeout(function(){ var e = document.getElementById('umuTopError'); if (e) e.remove(); }, 1000);
     <?php endif; ?>
 </script>
 <?php include 'includes/footer.php'; ?>

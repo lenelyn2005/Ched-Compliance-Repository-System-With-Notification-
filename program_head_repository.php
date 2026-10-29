@@ -7,10 +7,6 @@ requireDepartment();
 register_shutdown_function(static function () use ($pdo): void {
     syncPhRepository($pdo);
 });
-
-// ======================================================================
-//  SESSION & OWNERSHIP
-// ======================================================================
 $phId = (int) $_SESSION['user_id'];
 $ownDeptId = 0;
 $deptGone = false;
@@ -83,28 +79,32 @@ if (isset($_GET['action']) && $_GET['action'] === 'download' && isset($_GET['rep
     if (!$repo) die('Access denied.');
     $filePath = null;
     if (!empty($repo['file_path'])) {
-        $filePath = securePath($repo['file_path']);
+        $filePath = (string) $repo['file_path'];
     } elseif (!empty($repo['ph_requirement_id'])) {
         $reqStmt = $pdo->prepare("SELECT file_path FROM ph_requirements WHERE id = ?");
         $reqStmt->execute([$repo['ph_requirement_id']]);
         $req = $reqStmt->fetch();
-        if ($req && !empty($req['file_path'])) $filePath = securePath($req['file_path']);
+        if ($req && !empty($req['file_path'])) $filePath = (string) $req['file_path'];
     } elseif (!empty($repo['ph_document_id'])) {
         $docStmt = $pdo->prepare("SELECT file_path FROM ph_documents WHERE id = ?");
         $docStmt->execute([$repo['ph_document_id']]);
         $doc = $docStmt->fetch();
-        if ($doc && !empty($doc['file_path'])) $filePath = securePath($doc['file_path']);
+        if ($doc && !empty($doc['file_path'])) $filePath = (string) $doc['file_path'];
     } elseif (!empty($repo['document_id'])) {
         $docStmt2 = $pdo->prepare("SELECT file_path FROM documents WHERE id = ?");
         $docStmt2->execute([$repo['document_id']]);
         $doc2 = $docStmt2->fetch();
-        if ($doc2 && !empty($doc2['file_path'])) $filePath = securePath($doc2['file_path']);
+        if ($doc2 && !empty($doc2['file_path'])) $filePath = (string) $doc2['file_path'];
     }
-    if (!$filePath || !file_exists($filePath)) die('File not found.');
-    header('Content-Type: application/octet-stream');
-    header('Content-Disposition: attachment; filename="' . basename($filePath) . '"');
-    header('Content-Length: ' . filesize($filePath));
-    readfile($filePath);
+    // Storage outage must not read as "file not found" (plan §9).
+    try {
+        $available = $filePath !== null && storageObjectExists($filePath);
+    } catch (StorageException $e) {
+        error_log('[CHED] ph repo download blocked, storage unavailable: ' . get_class($e));
+        die('Storage temporarily unavailable. Please try again.');
+    }
+    if (!$available) die('File not found.');
+    storageStreamDownload($filePath, basename($filePath));
     exit;
 }
 
@@ -165,32 +165,32 @@ if (isset($_GET['action']) && $_GET['action'] === 'download_folder_zip' && isset
     $entries = [];
 
     foreach ($files as $f) {
-        $physicalPath = null;
+        $relPath = null;
 
         if (!empty($f['file_path'])) {
-            $physicalPath = securePath($f['file_path']);
+            $relPath = (string) $f['file_path'];
         }
-        if (!$physicalPath && !empty($f['linked_file_path'])) {
-            $physicalPath = securePath($f['linked_file_path']);
+        if (empty($relPath) && !empty($f['linked_file_path'])) {
+            $relPath = (string) $f['linked_file_path'];
         }
-        if (!$physicalPath && !empty($f['ph_requirement_id'])) {
+        if (empty($relPath) && !empty($f['ph_requirement_id'])) {
             $reqStmt = $pdo->prepare("SELECT file_path FROM ph_requirements WHERE id = ?");
             $reqStmt->execute([$f['ph_requirement_id']]);
             $req = $reqStmt->fetch();
             if ($req && !empty($req['file_path'])) {
-                $physicalPath = securePath($req['file_path']);
+                $relPath = (string) $req['file_path'];
             }
         }
-        if (!$physicalPath && !empty($f['document_id'])) {
+        if (empty($relPath) && !empty($f['document_id'])) {
             $docStmt = $pdo->prepare("SELECT file_path FROM documents WHERE id = ?");
             $docStmt->execute([$f['document_id']]);
             $doc = $docStmt->fetch();
             if ($doc && !empty($doc['file_path'])) {
-                $physicalPath = securePath($doc['file_path']);
+                $relPath = (string) $doc['file_path'];
             }
         }
 
-        if (!$physicalPath) continue;
+        if (empty($relPath)) continue;
 
         $fileFolderId = (int)$f['folder_id'];
         $subPath = $folderPaths[$fileFolderId] ?? '';
@@ -216,7 +216,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'download_folder_zip' && isset
             $counter++;
         }
 
-        $entries[$entryPath] = $physicalPath;
+        $entries[$entryPath] = $relPath;
     }
 
     if (empty($entries)) {
@@ -232,11 +232,30 @@ if (isset($_GET['action']) && $_GET['action'] === 'download_folder_zip' && isset
         exit;
     }
 
-    foreach ($entries as $entryPath => $physicalPath) {
-        $zip->addFile($physicalPath, $entryPath);
+    // ZipArchive reads each added file lazily at close(), so staged copies must
+    // outlive the loop and are removed only once close() has run (plan §6.1).
+    $stagedFiles = [];
+    $zipClosed   = false;
+    try {
+        foreach ($entries as $entryPath => $relPath) {
+            $staged = storageStageLocalCopy($relPath);
+            if ($staged === null) continue; // genuinely absent object: skip, never fail the whole archive
+            $stagedFiles[] = $staged;
+            $zip->addFile($staged, $entryPath);
+        }
+        $zipClosed = $zip->close();
+    } catch (StorageException $e) {
+        error_log('[CHED] ph repo ZIP blocked, storage unavailable: ' . get_class($e));
+        @unlink($tmpZipPath);
+        header('Location: program_head_repository.php?folder=' . $zipFolderId . '&error=' . urlencode('Storage temporarily unavailable. Please try again.'));
+        exit;
+    } finally {
+        foreach ($stagedFiles as $t) {
+            @unlink($t);
+        }
     }
 
-    if (!$zip->close()) {
+    if (!$zipClosed) {
         @unlink($tmpZipPath);
         header('Location: program_head_repository.php?folder=' . $zipFolderId . '&error=' . urlencode('Failed to finalize ZIP archive.'));
         exit;
@@ -675,32 +694,81 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $error = 'Your department was deleted, so you can no longer upload. Ask the administrator to reassign you to a department.';
         } else {
             $file = $_FILES['upload_file'];
-            $phSlug = phRootSlug($pdo, $phId) ?: ('ph_' . $phId);
-            // Full 7-layer pipeline from config.php: validation, content hash,
-            // duplicate check under a per-(PH, dept) lock, safe move under a
-            // system-generated name.
-            $stored = validateAndStoreUpload(
-                $pdo,
-                $file,
-                $title,
-                'ph_repository/' . $phSlug,
-                'updoc:repo:' . $phId . ':' . $deptId,
-                fn(PDO $pdo, string $hash) => findDuplicateRepoDoc($pdo, $deptId, $phId, $title, $hash)
-            );
-            if (is_string($stored)) {
-                $error = $stored;
+            $ext = strtolower(pathinfo(basename($file['name']), PATHINFO_EXTENSION));
+            if ($file['error'] !== UPLOAD_ERR_OK) {
+                $error = 'File upload error: ' . ($file['error'] ?? 'unknown');
+            } elseif (!in_array($ext, ALLOWED_EXTENSIONS)) {
+                $error = 'Invalid file type. Allowed: ' . ALLOWED_EXTENSIONS_LABEL . '.';
+            } elseif ($file['size'] > MAX_FILE_SIZE) {
+                $error = 'File too large (max 100 MB).';
             } else {
-                $repoHash = $stored['hash'];
-                $ext = $stored['ext'];
-                $filename = $stored['filename'];
-                $filePath = 'ph_repository/' . $phSlug . '/' . $filename;
-                $uploadDir = UPLOAD_PATH . 'ph_repository' . DIRECTORY_SEPARATOR . $phSlug . DIRECTORY_SEPARATOR;
+                $finfo = finfo_open(FILEINFO_MIME_TYPE);
+                $mime = finfo_file($finfo, $file['tmp_name']);
+                finfo_close($finfo);
+                if (isDangerousMime($mime)) {
+                    $error = 'Invalid file type. Allowed: ' . ALLOWED_EXTENSIONS_LABEL . '.';
+                }
+            }
+            if (empty($error)) {
+                $repoHash = hashUploadedTempFile($file);
+                if ($repoHash === null) {
+                    $error = 'Could not read the uploaded file to verify its contents. Please try again.';
+                } else {
+                    $dup = $pdo->prepare("SELECT id FROM ph_repository WHERE department_id <=> ? AND program_head_id = ? AND title = ? AND file_hash = ? LIMIT 1");
+                    $dup->execute([$deptId, $phId, $title, $repoHash]);
+                    if ($dup->fetch()) {
+                        $error = 'This exact file already exists in your repository for this title.';
+                    }
+                }
+            }
+            if (empty($error)) {
                 $folderId = !empty($_POST['folder_id']) ? (int)$_POST['folder_id'] : null;
                 if ($folderId !== null && $folderId > 0) {
                     $chk = $pdo->prepare("SELECT id FROM ph_repo_folders WHERE id = ? AND (department_id = ?) AND program_head_id = ?");
                     $chk->execute([$folderId, $deptId, $phId]);
                     if (!$chk->fetch()) $folderId = null;
                 }
+                $phSlug = phRootSlug($pdo, $phId) ?: ('ph_' . $phId);
+                $subdir = 'ph_repository/' . $phSlug;
+                $filename = allocateStorageFilename($subdir, $title, $ext);
+                $filePath = $subdir . '/' . $filename;
+                // Key the row was allocated, before finalizeStorageFilename may
+                // rename it — the rollback must only ever remove this one, or it
+                // would orphan a row that already exists.
+                $allocatedKey = $filePath;
+                $stored = false;
+                if (STORAGE_DRIVER === 'r2') {
+                    // This endpoint deliberately keeps its own validation pipeline
+                    // instead of validateAndStoreUpload(), so it stores the object
+                    // itself. ponytail: this is a duplicate of validateAndStoreUpload's
+                    // layer 7 — accepted because merging this endpoint into the shared
+                    // 7-layer pipeline is a separate behavior change. Drift between
+                    // the two copies is the ceiling; delete this branch when they merge.
+                    if (is_uploaded_file($file['tmp_name'])) {
+                        $fh = @fopen($file['tmp_name'], 'rb');
+                        if ($fh !== false) {
+                            try {
+                                R2Storage::default()->put($filePath, $fh, $mime, ['sha256' => $repoHash]);
+                                $stored = true;
+                            } catch (StorageException $e) {
+                                error_log('[CHED] r2 put failed for repo upload: ' . get_class($e));
+                            } finally {
+                                if (is_resource($fh)) fclose($fh);
+                            }
+                        }
+                    }
+                } else {
+                    $uploadDir = UPLOAD_PATH . 'ph_repository' . DIRECTORY_SEPARATOR . $phSlug . DIRECTORY_SEPARATOR;
+                    if (!is_dir($uploadDir)) mkdir($uploadDir, 0755, true);
+                    if (move_uploaded_file($file['tmp_name'], $uploadDir . $filename)) {
+                        $stored = true;
+                    } else {
+                        @unlink($uploadDir . $filename);
+                    }
+                }
+                if (!$stored) {
+                    $error = 'Failed to save uploaded file.';
+                } else {
                     $autoForward = isset($_POST['auto_forward']);
                     try {
                         $ins = $pdo->prepare("INSERT INTO ph_repository (department_id, program_head_id, folder_id, title, filename, file_path, description, forwarded_to_admin, forwarded_at, created_at, file_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?)");
@@ -747,11 +815,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 : "Document uploaded, but forwarding failed — use Forward on the entry to retry."
                             : "Document uploaded successfully.";
                     } catch (PDOException $e) {
-                        if (file_exists($uploadDir . $filename)) @unlink($uploadDir . $filename);
+                        storageDeleteRel($allocatedKey);
                         error_log('[CHED] repo_upload failed: ' . $e->getMessage());
                         $error = 'Failed to save upload.';
                     }
                 }
+            }
         }
         $redirect = 'program_head_repository.php?folder=' . ($currentFolderId ?? 0);
         if (!empty($success)) $redirect .= '&success=' . urlencode($success);
@@ -975,10 +1044,7 @@ if (!function_exists('ext_to_icon_slug')) {
 ob_start();
 ?>
 <style>
-/* ═══════════════════════════════════════════════════════════════
-   MY DOCUMENT REPOSITORY — UI
-   (offline · vanilla CSS · no webfonts)
-   ═══════════════════════════════════════════════════════════════ */
+    
 :root {
     --primary: #3563e9;
     --primary-dark: #2448c7;
@@ -1986,7 +2052,7 @@ include 'includes/header.php';
                                     $forwarded = !empty($item['forwarded_to_admin']);
                                     $created = $item['created_at'] ?? $item['uploaded_at'] ?? 'now';
                                     $filePath = $item['file_path'] ?? '';
-                                    $fileExists = !empty($filePath) && (bool)securePath($filePath);
+                                    $fileExists = !empty($filePath) && storageFilePresent((string) $filePath);
 
                                     // Determine icon slug from extension (fallback to title)
                                     $fileExtForIcon = !empty($filePath)
@@ -2570,7 +2636,7 @@ document.addEventListener('DOMContentLoaded', function() {
             btnMove.disabled = !hasStaged;
 
             if (hasStaged) {
-                hint.textContent = 'Copied ' + mv.ids.length + ' file(s) — go to destination and click Move';
+                hint.textContent = 'Copied ' + mv.ids.length + ' file';
                 hint.style.display = 'inline';
             } else {
                 hint.style.display = 'none';

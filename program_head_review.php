@@ -44,10 +44,16 @@ if (!$doc) {
     exit;
 }
 
-// Check if file exists
+// Check if file exists — only genuine absence may delete the row (plan §9).
 $filePath = $doc['file_path'] ?? null;
-$fullPath = !empty($filePath) ? securePath($filePath) : null;
-if (empty($filePath) || !$fullPath || !file_exists($fullPath) || !is_file($fullPath)) {
+try {
+    $fileGone = empty($filePath) || !storageObjectExists((string) $filePath);
+} catch (StorageException $e) {
+    error_log('[CHED] PH review blocked, storage unavailable: ' . get_class($e));
+    header('Location: program_head_pending.php?error=' . urlencode('Storage temporarily unavailable. Please try again.'));
+    exit;
+}
+if ($fileGone) {
     // Delete the record since file is missing
     $pdo->prepare("DELETE FROM documents WHERE id = ?")->execute([$submissionId]);
     logAudit($pdo, 'cleanup_missing_file', "Deleted document with missing file during " . phRoleShort() . " review: {$doc['title']}", 'documents', $submissionId);

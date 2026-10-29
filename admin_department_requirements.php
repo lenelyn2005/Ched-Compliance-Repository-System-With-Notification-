@@ -8,9 +8,6 @@ register_shutdown_function(static function () use ($pdo): void {
     syncStorageMirrors($pdo);
 });
 
-// ------------------------------------------------------------------
-// Handle POST actions (Folder & Requirement CRUD)
-// ------------------------------------------------------------------
 $error = '';
 $success = '';
 
@@ -74,6 +71,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if (!$fChk || (int)$fChk['department_id'] !== $deptId) {
                     $failEdit('Selected folder does not belong to this department.');
                 }
+            }
+            if ($action === 'add_requirement') {
+                $dupCheck = $pdo->prepare('SELECT id FROM department_requirements WHERE department_id = ? AND LOWER(category) = LOWER(?) AND LOWER(document_type) = LOWER(?)');
+                $dupCheck->execute([$deptId, $category, $docType]);
+                if ($dupCheck->fetch()) {
+                    $failEdit('Duplicate requirement: a requirement with the same title (category + document title) already exists for this department. Change the title or check before adding.');
+                }
+                // ponytail: case-insensitive duplicate guard only on insert; does not prevent similar duplicates across folders or departments, when upgrading add unique DB constraint
             }
             try {
                 $pdo->beginTransaction();
@@ -1533,18 +1538,22 @@ include 'includes/header.php';
     </div>
 <?php endif; ?>
 
-<?php if (!$deptId): ?>
+<?php // Feature: Department selection grid
+if (!$deptId): ?>
+    <!-- Feature: Department intro / header -->
     <div class="dept-intro">
         <div>
             <h2 class="dept-intro-title"><?= explorerIcon('folder') ?> Select Department</h2>
             <p class="dept-intro-sub">Choose a department to manage its folders and requirements.</p>
         </div>
+        <!-- Feature: Search bar -->
         <div class="search-bar">
             <input type="text" id="deptSearch" placeholder="Search departments...">
             <span class="count-badge" id="deptCount"><?= count($departments) ?> departments</span>
         </div>
     </div>
 
+    <!-- Feature: Department cards grid -->
     <div class="dept-grid" id="deptGrid">
         <?php foreach ($departments as $d):
             $stats = $deptStats[$d['id']] ?? ['requirements' => 0, 'folders' => 0];
@@ -1591,14 +1600,16 @@ include 'includes/header.php';
         });
     </script>
 
-<?php else: ?>
+<?php else: // Feature: Explorer / folder view ?>
     <?php if (empty($deptName)) {
         foreach ($departments as $d) {
             if ($d['id'] == $deptId) { $deptName = $d['department_name']; break; }
         }
     } ?>
+    <!-- Feature: Explorer container -->
     <div class="explorer-container">
         <div class="content-panel">
+            <!-- Feature: Breadcrumb navigation -->
             <nav class="breadcrumb" aria-label="Breadcrumb">
                 <?= explorerIcon('folder') ?>
                 <a href="?dept=<?= $deptId ?>" class="bc-chip"><?= htmlspecialchars($deptName) ?></a>
@@ -1614,6 +1625,7 @@ include 'includes/header.php';
                 <?php endif; ?>
             </nav>
 
+            <!-- Feature: Toolbar (back, copy, move, folder, req) -->
             <div class="toolbar">
                 <div class="toolbar-left">
                     <a href="?dept=" class="btn btn-sm btn-secondary" title="Back to all departments">
@@ -1632,6 +1644,7 @@ include 'includes/header.php';
                         <span id="clipboardHint" class="clipboard-hint" style="display:none;"></span>
                     </div>
                 </div>
+                <!-- Feature: Create folder / Create requirement buttons -->
                 <div class="btn-group">
                     <button class="btn btn-sm btn-secondary" data-csp-action="openFolderModal">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>
@@ -1644,7 +1657,8 @@ include 'includes/header.php';
                 </div>
             </div>
 
-            <?php if (empty($contents)): ?>
+            <?php // Feature: Empty state
+            if (empty($contents)): ?>
                 <div class="empty-state">
                     <div class="empty-icon"><?= explorerIcon('folder') ?></div>
                     <h3>This folder is empty</h3>
@@ -1660,7 +1674,8 @@ include 'includes/header.php';
                         </button>
                     </div>
                 </div>
-            <?php else: ?>
+            <?php else: // Feature: Folder / Requirement data table ?>
+                <!-- Feature: Data table -->
                 <table class="data-table">
                     <thead>
                         <tr>
@@ -1809,6 +1824,7 @@ include 'includes/header.php';
         </div>
     </div>
 
+    <!-- Feature: Drag & drop script -->
     <script nonce="<?= csp_nonce() ?>">
         window.__justDropped = false;
         document.querySelectorAll('.folder-row').forEach(row => {
@@ -1926,6 +1942,7 @@ include 'includes/header.php';
             window.__explorerShowToast = showToast;
         })();
 
+        <!-- Feature: Selection, copy, move -->
         (function(){
             const csrfToken = <?= json_encode(getCsrfToken()) ?>;
             const deptId = <?= json_encode((int)($deptId ?? 0)) ?>;
@@ -2069,6 +2086,7 @@ include 'includes/header.php';
     </script>
 <?php endif; ?>
 
+<!-- Feature: Modal — Create / Edit Requirement -->
 <!-- ========== MODAL: Create/Edit Requirement ========== -->
 <div class="modal-overlay<?= $editModalActive ? ' active pre-opened' : '' ?>" id="requirementModal" aria-hidden="<?= $editModalActive ? 'false' : 'true' ?>">
     <div class="modal-box wide">
@@ -2136,6 +2154,7 @@ include 'includes/header.php';
     </div>
 </div>
 
+<!-- Feature: Modal — Edit Folder -->
 <!-- ========== MODAL: Edit Folder ========== -->
 <div class="modal-overlay" id="editFolderModal" aria-hidden="true">
     <div class="modal-box modal-sm">
@@ -2164,6 +2183,7 @@ include 'includes/header.php';
     </div>
 </div>
 
+<!-- Feature: Modal — Confirm Delete -->
 <!-- ========== MODAL: Confirm Delete ========== -->
 <div class="modal-overlay" id="deleteConfirmModal" aria-hidden="true">
     <div class="modal-box modal-sm">
@@ -2186,6 +2206,7 @@ include 'includes/header.php';
     </div>
 </div>
 
+<!-- Feature: Toast — Success banner -->
 <!-- ========== TOAST: Success banner (top, auto-vanish) ========== -->
 <div class="modal-overlay" id="successModal" aria-hidden="true">
     <div class="modal-box toast-box" role="status" aria-live="polite">
@@ -2199,6 +2220,7 @@ include 'includes/header.php';
     </div>
 </div>
 
+<!-- Feature: Modal — Create Folder -->
 <!-- ========== MODAL: Create Folder ========== -->
 <div class="modal-overlay" id="folderModal" aria-hidden="true">
     <div class="modal-box modal-sm">
@@ -2228,6 +2250,7 @@ include 'includes/header.php';
 </div>
 
 <script nonce="<?= csp_nonce() ?>">
+// Feature: Teleport modals to <body>
 // Teleport modals to <body> so position:fixed always covers full viewport
 (function () {
     function teleportModals() {
@@ -2401,6 +2424,7 @@ document.addEventListener('keydown', function (e) {
     if (document.getElementById('successModal').classList.contains('active')) return closeSuccessModal();
 });
 
+// Feature: Deadline field (mm/dd/yyyy)
 // ---- Deadline field (mm/dd/yyyy) ----
 (function () {
     var text   = document.getElementById('reqExpiryDisplay');
@@ -2464,6 +2488,7 @@ document.addEventListener('keydown', function (e) {
     };
 })();
 
+// Feature: Edit modal prefill
 // ---- Edit modal prefill ----
 <?php if ($editModalActive && $editData): ?>
 (function () {
@@ -2489,6 +2514,7 @@ document.addEventListener('keydown', function (e) {
 })();
 <?php endif; ?>
 
+// Feature: AJAX submit for edit_requirement
 // ---- AJAX submit for edit_requirement ----
 (function () {
     var form   = document.getElementById('requirementForm');
@@ -2536,6 +2562,7 @@ document.addEventListener('keydown', function (e) {
     });
 })();
 
+// Feature: Show success toast if flash message
 // ---- Show success toast if there's a flash message ----
 (function () {
     var msg = <?= $success ? json_encode($success, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_QUOT) : 'null' ?>;

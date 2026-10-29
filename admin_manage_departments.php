@@ -33,7 +33,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         ->execute([$name, $code, $description]);
                     $newId = (int) $pdo->lastInsertId();
                     logAudit($pdo, 'create', "Dept created: $name", 'department', $newId);
-                    // No DB folder auto-created inside department per request — folders are created manually via admin_department_requirements
                     try { createDepartmentFolders($newId, $pdo); } catch (Throwable $e) { error_log('[Dept] create dirs failed: '.$e->getMessage()); }
                     if (function_exists('fileCacheDelete')) { fileCacheDelete('departments_list'); }
                     $success = "Department created successfully.";
@@ -76,7 +75,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $deleteModalError = $error;
                     } else {
                         $deptName = $tmpTarget['department_name'];
-                        $pdo->prepare('DELETE FROM teacher_requirements WHERE requirement_id IN (SELECT id FROM department_requirements WHERE department_id = ?)')->execute([$id]);
+                       $pdo->prepare('DELETE FROM teacher_requirements WHERE requirement_id IN (SELECT id FROM department_requirements WHERE department_id = ?)')->execute([$id]);
                         $pdo->prepare('DELETE FROM department_requirements WHERE department_id = ?')->execute([$id]);
                         $pdo->prepare('DELETE FROM departments WHERE id=?')->execute([$id]);
                         try { $pdo->prepare('DELETE FROM department_folders WHERE department_id=?')->execute([$id]); } catch (PDOException $e) {}
@@ -113,7 +112,6 @@ ob_start();
 ?>
 <style>
     @import url('offline/inter-font.css');
-/* Scoped to this page only — no :root leakage (ui-ux-pro-max: minimalism-and-swiss-style) */
 .umd-wrap {
     --umd-primary: #197B65;
     --umd-primary-dark: #125A4A;
@@ -371,9 +369,6 @@ include 'includes/header.php';
     </div>
 <?php endif; ?>
 
-
-
-
 <div class="umd-grid">
     <div class="umd-card">
         <div class="umd-card-head">
@@ -520,7 +515,6 @@ include 'includes/header.php';
                 <?php endif; ?>
                 <div style="margin-top:1rem">
                     <label for="umdDeletePass" class="umd-label">Confirm with your admin password <span style="color:#C53030">*</span></label>
-                    <input type="text" name="username" value="<?= sanitize($_SESSION['email'] ?? '') ?>" autocomplete="username" tabindex="-1" hidden>
                     <input type="password" name="admin_password" id="umdDeletePass" class="umd-input" required placeholder="Enter your password" autocomplete="current-password" style="<?= $deleteModalError ? 'border-color:#C53030' : '' ?>">
                 </div>
                 <p class="umd-modal-warn">This action will permanently remove the department and unlink its data.</p>

@@ -215,6 +215,7 @@ if (isset($_SESSION['user_id'])) {
 $roleLabel = 'User';
 $roleLower = strtolower((string) $headerUserRole);
 if ($roleLower === 'admin')                 $roleLabel = 'Administrator';
+elseif ($roleLower === 'super_admin')         $roleLabel = 'Super Administrator';
 elseif ($roleLower === 'department')        $roleLabel = 'Program Head';
 elseif ($roleLower !== '')                  $roleLabel = ucfirst(str_replace('_', ' ', $roleLower));
 
@@ -228,6 +229,13 @@ $hasAvatar     = !empty($headerAvatarUrl);
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="csrf-token" content="<?= htmlspecialchars(getCsrfToken(), ENT_QUOTES, 'UTF-8') ?>">
+    <?php if (isset($_SESSION['user_id'])): ?>
+    <meta name="ws-ticket" content="<?= htmlspecialchars(generateWsTicket((int)$_SESSION['user_id']), ENT_QUOTES, 'UTF-8') ?>">
+    <?php endif; ?>
+    <script nonce="<?= csp_nonce() ?>">
+        window.WS_HOST = <?= json_encode(getenv('WS_HOST') ?: 'localhost', JSON_UNESCAPED_SLASHES) ?>;
+        window.WS_PORT = <?= json_encode((string)(getenv('WS_PORT') ?: '8080'), JSON_UNESCAPED_SLASHES) ?>;
+    </script>
     <title><?= $pageTitle ?? 'CHED Compliance Repository' ?></title>
     <meta name="description"
         content="CHED Compliance Repository System - Digital document management for educational standards">
@@ -1073,11 +1081,10 @@ $hasAvatar     = !empty($headerAvatarUrl);
 
     <?php if (isset($extraStyles)) echo $extraStyles; ?>
 
-    <script src="includes/poller.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
-    <script nonce="<?= csp_nonce() ?>">
-        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
-    </script>
+    <script src="includes/poller.js" defer></script>
+    <?php /* pdf.js removed from <head>: it blocked first paint on every page and
+           hit the cdnjs CDN per request. footer.php lazy-loads the self-hosted
+           copy (offline/pdf.min.js) only when the preview modal opens. */ ?>
     <script nonce="<?= csp_nonce() ?>">
     function timeAgoFromTimestamp(timestamp) {
         const now = Math.floor(Date.now() / 1000);
@@ -1148,16 +1155,16 @@ $hasAvatar     = !empty($headerAvatarUrl);
                 <button type="button" class="search-trigger" id="searchTrigger"
                         aria-label="Open search (Ctrl+K)">
                     <?= render_icon('search') ?>
-                    <span class="st-label">Search documents, users, pages…</span>
+                    <span class="st-label"><?= (strtolower((string)($headerUserRole ?? '')) === 'staff') ? 'Search task' : 'Search documents, users, pages…' ?></span>
                     <kbd><span id="cmdkHintMod">Ctrl</span>K</kbd>
                 </button>
 
                 <!-- RIGHT: actions -->
                 <div class="appbar-right">
 
-                    <a href="<?= strtolower((string)$headerUserRole) === 'department' ? 'program_head_create_assign.php' : (strtolower((string)$headerUserRole) === 'teacher' ? 'teacher_tasks.php' : 'admin_department_requirements.php') ?>" class="quick-btn" title="<?= strtolower((string)$headerUserRole) === 'teacher' ? 'Task' : 'New' ?>">
+                    <a href="<?= (in_array(strtolower((string)$headerUserRole ?? ''), ['department','unit_head'], true)) ? 'program_head_create_assign.php' : (strtolower((string)$headerUserRole) === 'teacher' || strtolower((string)$headerUserRole ?? '') === 'staff' ? 'teacher_tasks.php' : 'admin_department_requirements.php') ?>" class="quick-btn" title="<?= (strtolower((string)$headerUserRole ?? '') === 'teacher' || strtolower((string)$headerUserRole ?? '') === 'staff') ? 'Task' : 'New' ?>">
                         <?= render_icon('plus') ?>
-                        <span><?= strtolower((string)$headerUserRole) === 'teacher' ? 'Task' : 'New' ?></span>
+                        <span><?= (strtolower((string)$headerUserRole ?? '') === 'teacher' || strtolower((string)$headerUserRole ?? '') === 'staff') ? 'Task' : 'New' ?></span>
                     </a>
 
                     <button class="icon-btn" id="notifBtn" data-tip="Notifications"
@@ -1169,27 +1176,7 @@ $hasAvatar     = !empty($headerAvatarUrl);
                         <?php endif; ?>
                     </button>
 
-                    <script nonce="<?= csp_nonce() ?>">
-                    (function () {
-                        var badge = document.getElementById('notifCountBadge');
-                        if (!badge) return;
-                        setInterval(function () {
-                            fetch('notifications.php', {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Requested-With': 'XMLHttpRequest' },
-                                body: 'action=get_notifications&last_id=0'
-                            }).then(function (r) { return r.json(); }).then(function (d) {
-                                if (typeof d.unread_count !== 'undefined') {
-                                    if (d.unread_count > 0) {
-                                        badge.textContent = d.unread_count > 99 ? '99+' : d.unread_count;
-                                    } else {
-                                        badge.remove();
-                                    }
-                                }
-                            }).catch(function () {});
-                        }, 1000);
-                    })();
-                    </script>
+                    <script src="includes/websocket_client.js" nonce="<?= csp_nonce() ?>"></script>
 
                     <button type="button" class="user-chip" id="userMenuBtn"
                             aria-haspopup="true" aria-expanded="false" aria-controls="profileDropdown">
@@ -1262,8 +1249,8 @@ $hasAvatar     = !empty($headerAvatarUrl);
                     </div>
 
                     <div class="pp-actions">
-                        <?php if (strtolower((string)$headerUserRole) === 'admin'): ?>
-                            <a href="admin_settings.php" class="pp-action" role="menuitem">
+                        <?php if (strtolower((string)$headerUserRole) === 'admin' || strtolower((string)$headerUserRole) === 'super_admin'): ?>
+                            <a href="<?= strtolower((string)$headerUserRole) === 'super_admin' ? 'super_admin_settings.php' : 'admin_settings.php' ?>" class="pp-action" role="menuitem">
                                 <?= render_icon('settings') ?> Account settings
                             </a>
                             <div class="pp-divider"></div>
@@ -1381,7 +1368,7 @@ $hasAvatar     = !empty($headerAvatarUrl);
                 <div class="cmdk-input-wrap">
                     <?= render_icon('search') ?>
                     <input type="text" class="cmdk-input" id="cmdkInput"
-                           placeholder="<?= in_array($cmdkRole, ['admin', 'department', 'teacher'], true) ? 'Search documents, requirements, accounts…' : 'Type a command or search…' ?>"
+                           placeholder="<?= (in_array($cmdkRole, ['admin','department','teacher','unit_head'], true)) ? 'Search documents, requirements, accounts…' : ($cmdkRole === 'staff' ? 'Search task' : 'Type a command or search…') ?>" // shortcut: only staff gets 'Search task'; upgrade: add 'faculty'
                            autocomplete="off" spellcheck="false">
                     <span class="cmdk-esc">ESC</span>
                 </div>
@@ -1398,7 +1385,7 @@ $hasAvatar     = !empty($headerAvatarUrl);
                             ['Audit Trail', 'admin_audit_trail.php', 'info', ''],
                             ['Notifications', 'notifications.php', 'bell', ''],
                         ];
-                    } elseif ($cmdkRole === 'department') {
+                    } elseif ($cmdkRole === 'department' || $cmdkRole === 'unit_head') { // shortcut: unit_head = program head
                         $cmdkItems = [
                             ['Dashboard', 'program_head_dashboard.php', 'home', 'Home'],
                             ['Create & Assign', 'program_head_create_assign.php', 'upload-cloud', 'New'],

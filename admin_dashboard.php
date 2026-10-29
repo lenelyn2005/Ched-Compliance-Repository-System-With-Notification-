@@ -7,7 +7,7 @@ header('Pragma: no-cache');
 
 // Live dashboard refresh (30s poll + WS-triggered). Read-only; role-guarded.
 if (isAjaxRequest() && ($_POST['action'] ?? '') === 'refresh_dashboard') {
-    $adminId = (int)($_SESSION['admin_id'] ?? 0);
+    $adminId = ($_SESSION['role'] ?? '') === 'super_admin' ? null : (int)($_SESSION['admin_id'] ?? 0);
     $stats = getAdminDashboardStats($pdo);
     $stats['expiredCount'] = count(getExpiredRequirements($pdo, $adminId ?: null));
     sendJson($stats);
@@ -19,9 +19,9 @@ if (isAjaxRequest() && ($_POST['action'] ?? '') === 'dismiss_expired') {
         http_response_code(403);
         sendJson(['success' => false, 'message' => 'Invalid security token. Please refresh the page and try again.']);
     }
-    $adminId = (int)($_SESSION['admin_id'] ?? 0);
+    $adminId = ($_SESSION['role'] ?? '') === 'super_admin' ? null : (int)($_SESSION['admin_id'] ?? 0);
     $reqId = (int)($_POST['requirement_id'] ?? 0);
-    if (!$adminId || !$reqId) {
+    if ((($_SESSION['role'] ?? '') !== 'super_admin' && !$adminId) || !$reqId) {
         sendJson(['success' => false, 'message' => 'Invalid request.']);
     }
     $check = $pdo->prepare("SELECT id FROM department_requirements WHERE id = ? AND status = 'expired'");
@@ -29,9 +29,13 @@ if (isAjaxRequest() && ($_POST['action'] ?? '') === 'dismiss_expired') {
     if (!$check->fetch()) {
         sendJson(['success' => false, 'message' => 'Requirement not found or not expired.']);
     }
-    $ins = $pdo->prepare("INSERT IGNORE INTO admin_dashboard_dismissals (admin_id, requirement_id) VALUES (?, ?)");
-    $ins->execute([$adminId, $reqId]);
-    logAudit($pdo, 'dismiss_expired', "Admin dismissed expired requirement #$reqId from dashboard", 'department_requirements', $reqId);
+    if (($_SESSION['role'] ?? '') === 'super_admin') {
+        logAudit($pdo, 'dismiss_expired', "Super Admin dismissed expired requirement #$reqId from dashboard (global)", 'department_requirements', $reqId);
+    } else {
+        $ins = $pdo->prepare("INSERT IGNORE INTO admin_dashboard_dismissals (admin_id, requirement_id) VALUES (?, ?)");
+        $ins->execute([$adminId, $reqId]);
+        logAudit($pdo, 'dismiss_expired', "Admin dismissed expired requirement #$reqId from dashboard", 'department_requirements', $reqId);
+    }
     sendJson(['success' => true]);
 }
 
@@ -179,7 +183,7 @@ $depts = db_query("
 ");
 
 autoExpireRequirements($pdo, $_SESSION['user_id'] ?? null);
-$adminId = (int)($_SESSION['admin_id'] ?? 0);
+$adminId = ($_SESSION['role'] ?? '') === 'super_admin' ? null : (int)($_SESSION['admin_id'] ?? 0);
 $expiredReqs = getExpiredRequirements($pdo, $adminId ?: null);
 
 $reqSqlFull = "SELECT dr.*, d.department_name,
@@ -234,7 +238,6 @@ $flashError = $_GET['error'] ?? '';
 
 $pageTitle = 'Admin Dashboard';
 
-// SVG icon helper (same set as program_head_dashboard.php — UI only)
 if (!function_exists('render_dashboard_icon')) {
     function render_dashboard_icon(string $name): string {
         $icons = [
@@ -258,9 +261,6 @@ if (!function_exists('render_dashboard_icon')) {
     }
 }
 
-// ============================================================================
-// MODERN UI STYLES
-// ============================================================================
 
 ob_start();
 ?>
@@ -268,7 +268,6 @@ ob_start();
     @import url('offline/inter-font.css');
 
     :root {
-        /* Color Palette — same as program_head_dashboard */
         --primary: #2563eb;
         --primary-dark: #1d4ed8;
         --primary-light: #eff6ff;
@@ -1872,7 +1871,7 @@ include 'includes/header.php';
         </div>
     </div>
 
-    <div class="card" style="margin-top:1.25rem;">
+   <div class="card" style="margin-top:1.25rem;">
         <div class="card-header" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.5rem; padding:0.875rem 1.25rem;">
             <h3 style="margin:0; font-size:0.95rem; font-weight:650; color:var(--gray-900); display:flex; align-items:center; gap:0.55rem; letter-spacing:-0.01em;">
                 <?= render_dashboard_icon('folder') ?> All Requirements

@@ -1027,6 +1027,15 @@ include 'includes/header.php';
                             } else {
                                 $sc = ['label' => 'Not Uploaded', 'class' => 'badge-secondary', 'icon' => 'not-started', 'canUpload' => true];
                             }
+                            if (in_array($status, ['approved_program_head', 'approved_admin'])) {
+                                $statusCategory = 'completed';
+                            } elseif (in_array($status, ['pending_program_head', 'pending_admin'])) {
+                                $statusCategory = 'pending';
+                            } elseif (in_array($status, ['rejected_program_head', 'rejected_admin'])) {
+                                $statusCategory = 'rejected';
+                            } else {
+                                $statusCategory = 'not-uploaded';
+                            }
                             $taskRowId = !empty($req['is_ph_requirement'])
                                 ? 'ph_task:' . (int) ($req['ph_requirement_id'] ?? 0)
                                 : 'task:' . (int) ($req['id'] ?? 0);
@@ -1157,7 +1166,7 @@ include 'includes/header.php';
                     <div class="form-group">
                         <label>File <span style="color:var(--danger)">*</span></label>
                         <input type="file" name="document_file" class="form-control"
-                            accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.gif,.webp,.xls,.xlsx" required>
+                            accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.gif,.webp,.xls,.xlsx,.ppt,.pptx" required>
                     </div>
                     <div class="form-group">
                         <label>Comment</label>

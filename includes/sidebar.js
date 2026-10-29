@@ -145,9 +145,6 @@ document.addEventListener('DOMContentLoaded', function () {
     });
   }
 
-  // --- Direct POST logout (skip logout.php's auto-submit interstitial) ---
-  // The GET fallback page still exists for no-JS browsers; this just removes
-  // the visible white-page flash for everyone else.
   document.addEventListener('click', function (e) {
     const a = e.target.closest('a[href="logout.php"]');
     if (!a) return;
@@ -227,73 +224,8 @@ document.addEventListener('DOMContentLoaded', function () {
       return Math.floor(diff / 2592000) + ' months ago';
     }
 
-    function pollNotifications() {
-      fetch('notifications.php', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Requested-With': 'XMLHttpRequest' },
-        body: 'action=get_notifications&last_id=' + lastNotifId
-      })
-        .then(function (res) { return res.json(); })
-        .then(function (data) {
-          if (!data.success || !data.notifications || data.notifications.length === 0) {
-            updateNotifBadge(data.unread_count || 0);
-            return;
-          }
-          const list = notifDropdown.querySelector('.notif-list');
-          if (!list) return;
-          data.notifications.forEach(function (n) {
-            if (n.id > lastNotifId) {
-              lastNotifId = n.id;
-              const ts = n.created_at && n.created_at !== '0000-00-00 00:00:00'
-                ? Math.floor(new Date(n.created_at).getTime() / 1000) : 0;
-              const time = ts > 0
-                ? '<span class="relative-time" data-timestamp="' + ts + '">' + timeAgoFromTimestamp(ts) + '</span>'
-                : 'Just now';
-              const emptyState = list.querySelector('.notif-empty-state');
-              if (emptyState) emptyState.remove();
-              const footer = list.querySelector('.notif-dropdown-footer');
-              const item = document.createElement('a');
-              item.href = 'notifications.php';
-              item.className = 'notif-item unread';
-              item.setAttribute('data-notification-id', n.id);
-              item.innerHTML =
-                '<span class="notif-icon info"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg></span>' +
-                '<div class="notif-content">' +
-                '<div class="notif-title">' + escapeHtml(n.title) + '</div>' +
-                '<div class="notif-msg">' + escapeHtml((n.message || '').slice(0, 70)) + '</div>' +
-                '<div class="notif-time">' + time + '</div>' +
-                '</div>';
-              if (footer) {
-                list.insertBefore(item, footer);
-              } else {
-                list.appendChild(item);
-              }
-            }
-          });
-          updateNotifBadge(data.unread_count || 0);
-        })
-        .catch(function () {});
-    }
-
-    function updateNotifBadge(count) {
-      let badge = document.getElementById('notifCountBadge');
-      if (count > 0) {
-        if (!badge) {
-          badge = document.createElement('span');
-          badge.id = 'notifCountBadge';
-          badge.className = 'notif-count';
-          notifBtn.appendChild(badge);
-        }
-        badge.style.display = '';
-        badge.textContent = count;
-      } else if (badge) {
-        badge.style.display = 'none';
-      }
-    }
-
-    // Poll every 1s; source of truth for the bell (no WebSocket dependency)
-    setInterval(pollNotifications, 1000);
-    setTimeout(pollNotifications, 2000);
+    // shortcut: notification polling removed; real-time handled by websocket_client.js.
+    // Existing dropdown UI preserved; WebSocket events update badge and prepend items.
   }
 
   // --- Data-confirm links ---

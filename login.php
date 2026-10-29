@@ -41,10 +41,8 @@ if (!isset($_SESSION['last_regeneration'])) {
 
 define('MAX_ATTEMPTS', 3);          // per-account
 define('LOCKOUT_WINDOW', 300);       // 5 minutes
-
 define('DEVICE_MAX_ATTEMPTS', 3);    // per-device
 define('DEVICE_LOCKOUT_WINDOW', 300);
-
 define('IP_RATE_LIMIT', 20);         // mass-attack guard (per IP)
 define('IP_RATE_WINDOW', 300);
 
@@ -56,10 +54,6 @@ require_once 'config.php';
 
 // perf_headers() (from config.php) resets this to SAMEORIGIN; login must never be frameable.
 header('X-Frame-Options: DENY');
-
-// ============================================================
-// DEVICE ID (persistent cookie — identifies the physical device)
-// ============================================================
 
 function getDeviceId(): string {
     $cookieName = 'chd_device_id';
@@ -186,10 +180,6 @@ function buildSecurityAlertBody(string $ip, string $ua): string {
          . 'or account details.';
 }
 
-
-// In-app only, sent to every admin — never the affected user, and no email
-// is ever sent for these (see $NOTIFICATION_EMAIL_ENABLED in config.php).
-// The locked account's email is deliberately left out of the body.
 function sendLoginSecurityAlert(PDO $pdo, string $ip, string $ua): void {
     try {
         $body   = buildSecurityAlertBody($ip, $ua);
@@ -207,10 +197,6 @@ function sendLoginSecurityAlert(PDO $pdo, string $ip, string $ua): void {
     }
 }
 
-// ============================================================
-// ATTEMPT LOGIN (per-account lockout — atomic)
-// ============================================================
-
 function attemptLogin(PDO $pdo, string $email, string $password, string $ip, string $deviceId): array {
     if ($pdo->inTransaction()) {
         $pdo->rollBack();
@@ -221,9 +207,10 @@ function attemptLogin(PDO $pdo, string $email, string $password, string $ip, str
         $activeCols = !empty($GLOBALS['active_session_cols'])
             ? ', active_session_token, active_session_last_seen'
             : '';
+        $isActiveCol = !empty($GLOBALS['users_is_active_col']) ? ', is_active' : '';
         $stmt = $pdo->prepare(
             'SELECT id, name, email, password, role, department_id,
-                    failed_login_attempts, locked_until' . $activeCols . '
+                    failed_login_attempts, locked_until' . $activeCols . $isActiveCol . '
                FROM users
               WHERE email = ?
               FOR UPDATE'
@@ -250,12 +237,14 @@ function attemptLogin(PDO $pdo, string $email, string $password, string $ip, str
         }
 
         if (password_verify($password, $user['password'])) {
+            // Deactivated accounts authenticate but are never signed in: no session,
+            // no counter bump (being switched off is not a guessed password).
+            if (isset($user['is_active']) && (int) $user['is_active'] === 0) {
+                recordAttempt($pdo, $email, $ip, $deviceId, false);
+                $pdo->commit();
+                return ['status' => 'deactivated'];
+            }
             if (!empty($GLOBALS['active_session_cols'])) {
-                // One live session per account: if the account already holds a
-                // FRESH token, another browser/device owns that session — deny.
-                // TTL matches the 5-min idle timeout, so a token last seen longer
-                // ago is genuinely dead (the app would have idle-logged it out)
-                // and can be taken over.
                 $activeToken = $user['active_session_token'];
                 $lastSeen    = (int) ($user['active_session_last_seen'] ?? 0);
                 if ($activeToken !== null && (time() - $lastSeen) < ACTIVE_SESSION_TTL) {
@@ -326,6 +315,7 @@ if (random_int(1, 100) === 1) {
 if (isset($_SESSION['user_id']) && isset($_SESSION['role'])) {
     switch ($_SESSION['role']) {
         case 'admin':      header('Location: admin_dashboard.php'); exit;
+        case 'super_admin': header('Location: super_admin_dashboard.php'); exit;
         case 'department':
         case 'unit_head':  header('Location: program_head_dashboard.php'); exit;
         case 'teacher':
@@ -450,6 +440,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                 switch ($user['role']) {
                     case 'admin':      header('Location: admin_dashboard.php'); break;
+                    // Role comes from the users row (never from form input), so a
+                    // super admin lands on their own dashboard and nothing else changes.
+                    case 'super_admin': header('Location: super_admin_dashboard.php'); break;
                     case 'department':
                     case 'unit_head':  header('Location: program_head_dashboard.php'); break;
                     case 'teacher':
@@ -458,13 +451,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
                 exit;
             }
+            elseif ($auth['status'] === 'deactivated') {
+                // Credentials were correct, so this is safe to say plainly — it
+                // reveals nothing an attacker without the password could learn.
+                logAudit($pdo, 'login_denied_deactivated', 'Deactivated account sign-in blocked: ' . $email . ' from IP: ' . $ip);
+                $error = 'This account has been deactivated. Contact the administrator.';
+            }
             elseif ($auth['status'] === 'already_active') {
                 logAudit($pdo, 'login_denied_active_session', 'Duplicate login blocked: ' . $email . ' from IP: ' . $ip);
                 $error = 'This account is already logged in on another browser or device. Log out there and try again.';
             }
             else {
                 logAudit($pdo, 'login_failed', 'Failed login attempt for: ' . $email . ' from IP: ' . $ip);
-
                 $deviceFailures = countDeviceFailures($pdo, $device_id, DEVICE_LOCKOUT_WINDOW);
                 if ($deviceFailures >= DEVICE_MAX_ATTEMPTS) {
                     $until = time() + DEVICE_LOCKOUT_WINDOW;
@@ -485,10 +483,8 @@ $lock_minutes  = (int) floor($lock_remaining / 60);
 $lock_seconds  = $lock_remaining % 60;
 $lock_display  = sprintf('%02d:%02d', $lock_minutes, $lock_seconds);
 
-// Absolute unlock time in ms, so the client never has to decrement.
 $unlock_at_ms = (int) ((time() + $lock_remaining) * 1000);
 
-// Correct denominator for the progress bar (matches whichever lock actually fired)
 if ($lock_total <= 0) {
     $lock_total = $lock_remaining > 0 ? $lock_remaining : 1;   // safety fallback
 }

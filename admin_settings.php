@@ -3,18 +3,23 @@ define('CHED_APP', true);
 require_once 'config.php';
 require_once 'includes/avatar_helpers.php';
 requireAdmin();
+if (superadmin()) {
+    header('Location: super_admin_settings.php');
+    exit;
+}
 
 $error = '';
 $success = '';
 $openTab = 'admin-account';
+$currentRole = ($_SESSION['role'] ?? 'admin');
 
 if (isset($_GET['msg'])) {
     $success = $_GET['msg'];
 }
 
 $adminId = (int)($_SESSION['user_id'] ?? 0);
-$stmt = $pdo->prepare('SELECT id, name, email, role, avatar FROM users WHERE id = ? AND role = ?');
-$stmt->execute([$adminId, 'admin']);
+$stmt = $pdo->prepare('SELECT id, name, email, role, avatar FROM users WHERE id = ?');
+$stmt->execute([$adminId]);
 $admin = $stmt->fetch(PDO::FETCH_ASSOC);
 
 if (!$admin) {
@@ -43,7 +48,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'updat
         } else {
             try {
                 $pdo->prepare('UPDATE users SET name = ?, email = ? WHERE id = ? AND role = ?')
-                    ->execute([$name, $email, $adminId, 'admin']);
+                    ->execute([$name, $email, $adminId, $currentRole]);
                 $_SESSION['user_name'] = $name;
                 $_SESSION['email'] = $email;
                 $admin['name'] = $name;
@@ -67,7 +72,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'uploa
         $error = $res['error'];
     } else {
         $pdo->prepare('UPDATE users SET avatar = ? WHERE id = ? AND role = ?')
-            ->execute([$res['path'], $adminId, 'admin']);
+            ->execute([$res['path'], $adminId, $currentRole]);
         if (($admin['avatar'] ?? '') && $admin['avatar'] !== $res['path']) {
             avatarDelete($admin['avatar']);
         }
@@ -84,7 +89,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'remov
     $openTab = 'admin-account';
     avatarDelete($admin['avatar'] ?? null);
     $pdo->prepare('UPDATE users SET avatar = NULL WHERE id = ? AND role = ?')
-        ->execute([$adminId, 'admin']);
+        ->execute([$adminId, $currentRole]);
     unset($_SESSION['avatar']);
     $admin['avatar'] = null;
     logAudit($pdo, 'edit', 'Admin profile photo removed', 'user', $adminId);
@@ -117,7 +122,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'chang
         $error = 'New passwords do not match.';
     } else {
         $stmt = $pdo->prepare('SELECT password FROM users WHERE id = ? AND role = ?');
-        $stmt->execute([$adminId, 'admin']);
+        $stmt->execute([$adminId]);
         $row = $stmt->fetch(PDO::FETCH_ASSOC);
         if (!$row || !password_verify($current, $row['password'])) {
             $_SESSION['pw_change_attempts'][] = $now;
@@ -125,7 +130,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'chang
         } else {
             try {
                 $pdo->prepare('UPDATE users SET password = ? WHERE id = ? AND role = ?')
-                    ->execute([password_hash($new, PASSWORD_DEFAULT), $adminId, 'admin']);
+                    ->execute([password_hash($new, PASSWORD_DEFAULT), $adminId, $currentRole]);
                 $_SESSION['pw_change_attempts'] = [];
                 logAudit($pdo, 'edit', 'Admin password changed', 'user', $adminId);
                 $success = 'Password changed successfully. Use your new password next time you log in.';
@@ -137,12 +142,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'chang
     }
 }
 
-$storageRoot = rtrim(SECURE_STORAGE_PATH, '/\\');
-$archivePath = $storageRoot . DIRECTORY_SEPARATOR . 'admin_archive';
 $tempRoot = rtrim(TEMP_PATH, '/\\');
 
-$secureStorageOk = is_dir($storageRoot) && is_writable($storageRoot);
-$archiveOk = is_dir($archivePath) || is_writable($storageRoot);
+if (STORAGE_DRIVER === 'r2') {
+    try {
+        R2Storage::default()->headBucket();
+        $secureStorageOk = true;
+        $archiveOk = true;
+    } catch (StorageException $e) {
+        error_log('[CHED] settings storage probe failed: ' . get_class($e));
+        $secureStorageOk = false;
+        $archiveOk = false;
+    }
+} else {
+    $secureStorageOk = is_dir(rtrim(SECURE_STORAGE_PATH, '/\\')) && is_writable(rtrim(SECURE_STORAGE_PATH, '/\\'));
+    $archiveOk = is_dir(rtrim(SECURE_STORAGE_PATH, '/\\') . DIRECTORY_SEPARATOR . 'admin_archive') || is_writable(rtrim(SECURE_STORAGE_PATH, '/\\'));
+}
 $tempOk = is_dir($tempRoot);
 $dbOk = false;
 try {
@@ -1137,8 +1152,6 @@ $settingsAvatarUrl = avatarUrl($admin['avatar'] ?? null);
 $tabs = [
     ['key' => 'admin-account',   'label' => 'Account Details',   'desc' => 'Your name, email, photo',      'group' => 'Account', 'icon' => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z"/></svg>'],
     ['key' => 'change-password', 'label' => 'Change Password',   'desc' => 'Update your login password',  'group' => 'Account', 'icon' => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z"/></svg>'],
-    ['key' => 'storage',         'label' => 'Storage',           'desc' => 'Repository configuration',    'group' => 'System', 'icon' => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 0v3.75m-16.5-3.75v3.75m16.5 0v3.75C20.25 16.153 16.556 18 12 18s-8.25-1.847-8.25-4.125v-3.75"/></svg>'],
-    ['key' => 'system-info',     'label' => 'System Information', 'desc' => 'Runtime and diagnostics',    'group' => 'System', 'icon' => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z"/></svg>'],
 ];
 ?>
 <div class="as-app">
@@ -1374,89 +1387,6 @@ $tabs = [
                 </section>
             </div>
 
-            <!-- ========== STORAGE ========== -->
-            <div class="as-panel" id="panel-storage" role="tabpanel" aria-labelledby="tab-storage" tabindex="0" hidden>
-                <section class="as-card">
-                    <div class="as-card-head">
-                        <span class="as-card-head-icon" aria-hidden="true">
-                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 0v3.75m-16.5-3.75v3.75m16.5 0v3.75C20.25 16.153 16.556 18 12 18s-8.25-1.847-8.25-4.125v-3.75"/></svg>
-                        </span>
-                        <div class="as-card-head-text">
-                            <h2>Storage Configuration</h2>
-                            <p>Where the repository stores your documents</p>
-                        </div>
-                        <span class="as-card-head-badge">Read only</span>
-                    </div>
-                    <dl class="as-info">
-                        <div class="as-info-row" style="grid-template-columns:1fr; gap:.6rem;">
-                            <dt>Secure storage path</dt>
-                            <dd>
-                                <div class="as-path-row">
-                                    <span class="as-path" id="path-storage"><?= sanitize($storageRoot) ?></span>
-                                    <button type="button" class="as-copy" data-copy="#path-storage" title="Copy path" aria-label="Copy storage path">
-                                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
-                                    </button>
-                                </div>
-                            </dd>
-                        </div>
-                        <div class="as-info-row">
-                            <dt>Repository</dt>
-                            <dd><?= $secureStorageOk ? '<span class="as-tag as-tag-ok">Connected</span>' : '<span class="as-tag as-tag-warn">Unavailable</span>' ?></dd>
-                        </div>
-                        <div class="as-info-row">
-                            <dt>Archive folder</dt>
-                            <dd><?= $archiveOk ? '<span class="as-tag as-tag-ok">Connected</span>' : '<span class="as-tag as-tag-warn">Unavailable</span>' ?></dd>
-                        </div>
-                        <div class="as-info-row">
-                            <dt>Temporary storage</dt>
-                            <dd><?= $tempOk ? '<span class="as-tag as-tag-ok">Connected</span>' : '<span class="as-tag as-tag-warn">Unavailable</span>' ?></dd>
-                        </div>
-                        <div class="as-info-row">
-                            <dt>Max upload size</dt>
-                            <dd><?= number_format(MAX_FILE_SIZE / (1024 * 1024), 0) ?> MB</dd>
-                        </div>
-                        <div class="as-info-row">
-                            <dt>Allowed file types</dt>
-                            <dd><?= sanitize(ALLOWED_EXTENSIONS_LABEL) ?></dd>
-                        </div>
-                    </dl>
-                </section>
-            </div>
-
-            <!-- ========== SYSTEM INFO ========== -->
-            <div class="as-panel" id="panel-system-info" role="tabpanel" aria-labelledby="tab-system-info" tabindex="0" hidden>
-                <section class="as-card">
-                    <div class="as-card-head">
-                        <span class="as-card-head-icon" aria-hidden="true">
-                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z"/></svg>
-                        </span>
-                        <div class="as-card-head-text">
-                            <h2>System Information</h2>
-                            <p>Runtime environment and diagnostic info</p>
-                        </div>
-                        <span class="as-card-head-badge">Read only</span>
-                    </div>
-                    <dl class="as-info">
-                        <div class="as-info-row"><dt>System name</dt><dd>CHED Compliance Repository System</dd></div>
-                        <div class="as-info-row"><dt>User role</dt><dd>Administrator</dd></div>
-                        <div class="as-info-row"><dt>Application version</dt><dd>1.0.0</dd></div>
-                        <div class="as-info-row">
-                            <dt>Database</dt>
-                            <dd><?= $dbOk ? '<span class="as-tag as-tag-ok">Connected</span>' : '<span class="as-tag as-tag-warn">Disconnected</span>' ?></dd>
-                        </div>
-                        <div class="as-info-row">
-                            <dt>Secure storage</dt>
-                            <dd><?= $secureStorageOk ? '<span class="as-tag as-tag-ok">Connected</span>' : '<span class="as-tag as-tag-warn">Unavailable</span>' ?></dd>
-                        </div>
-                        <div class="as-info-row"><dt>PHP version</dt><dd><?= sanitize(PHP_VERSION) ?></dd></div>
-                        <div class="as-info-row">
-                            <dt>Last system update</dt>
-                            <dd><?= $lastMigration ? date('M j, Y · g:i A', strtotime($lastMigration)) : 'Not available' ?></dd>
-                        </div>
-                    </dl>
-                </section>
-            </div>
-
         </main>
     </div>
 </div>
@@ -1530,9 +1460,7 @@ $tabs = [
     var tabs = Array.prototype.slice.call(document.querySelectorAll('.as-nav-item'));
     var panels = {
         'admin-account':   document.getElementById('panel-admin-account'),
-        'change-password': document.getElementById('panel-change-password'),
-        'storage':         document.getElementById('panel-storage'),
-        'system-info':     document.getElementById('panel-system-info')
+        'change-password': document.getElementById('panel-change-password')
     };
 
     function showTab(key, focusTab) {
