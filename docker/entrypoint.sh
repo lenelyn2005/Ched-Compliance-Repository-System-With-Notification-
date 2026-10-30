@@ -12,13 +12,19 @@ elif [ -n "$DB_SSL_CA" ] && [ -f "$DB_SSL_CA" ]; then
     cp "$DB_SSL_CA" "$CA_TARGET"
 elif [ -f /etc/secrets/ca.pem ]; then
     cp /etc/secrets/ca.pem "$CA_TARGET"
+elif [ -f /var/www/html/certs/ca.pem ]; then
+    # Aiven project CA committed in the repo (public cert, not a secret).
+    cp /var/www/html/certs/ca.pem "$CA_TARGET"
 fi
 if [ -f "$CA_TARGET" ]; then
     chmod 0644 "$CA_TARGET"
     export DB_SSL_CA="$CA_TARGET"
     unset DB_SSL_CA_CERT
+    echo "[entrypoint] Database CA certificate: $CA_TARGET" >&2
 else
-    echo "[entrypoint] WARNING: no database CA certificate found; connecting without TLS verification setup." >&2
+    # Don't point PHP at a file that doesn't exist (it would refuse to connect).
+    unset DB_SSL_CA
+    echo "[entrypoint] WARNING: no database CA certificate found (set a Render Secret File 'ca.pem' or commit certs/ca.pem)." >&2
 fi
 
 # Runtime dirs (Render disks, if mounted, start empty and root-owned).

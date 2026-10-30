@@ -31,10 +31,8 @@ services:
         sync: false
       - key: DB_PASS
         sync: false
-      # Add Aiven's ca.pem as a Render Secret File named "ca.pem";
-      # it is mounted at /etc/secrets/ca.pem.
-      - key: DB_SSL_CA
-        value: /etc/secrets/ca.pem
+      # CA certificate: the container uses (in order) DB_SSL_CA_CERT env text,
+      # a Render Secret File named "ca.pem", or certs/ca.pem from the repo.
       # Aiven's default sql_mode includes ANSI; use XAMPP/MariaDB-like mode.
       - key: DB_SQL_MODE
         value: STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION
