@@ -14,6 +14,7 @@ $nonceAttr = $cspNonce !== '' ? ' nonce="' . htmlspecialchars($cspNonce, ENT_QUO
 header('Cache-Control: no-store, must-revalidate');
 header('Pragma: no-cache');
 
+
 function deny_share(int $httpCode, string $message, string $title = 'Access Denied'): void
 {
     http_response_code($httpCode);
@@ -44,6 +45,7 @@ HTML;
     exit;
 }
 
+
 function utc_to_local(string $utc, string $fmt = 'M d, Y g:i A'): string
 {
     try {
@@ -53,6 +55,7 @@ function utc_to_local(string $utc, string $fmt = 'M d, Y g:i A'): string
     } catch (Throwable $e) { return $utc; }
 }
 
+
 function request_is_https(): bool
 {
     $xfp = strtolower(trim(explode(',', $_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '')[0]));
@@ -60,6 +63,7 @@ function request_is_https(): bool
         || (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
         || ($_SERVER['SERVER_PORT'] ?? '') === '443';
 }
+
 
 function assert_link_usable(PDO $pdo, array $link, bool $isReturningVisitor = false): void
 {
@@ -90,6 +94,7 @@ function assert_link_usable(PDO $pdo, array $link, bool $isReturningVisitor = fa
     }
 }
 
+
 function fetch_all_departments(PDO $pdo): array
 {
     return $pdo->query("
@@ -99,6 +104,7 @@ function fetch_all_departments(PDO $pdo): array
         ORDER BY department_name
     ")->fetchAll();
 }
+
 
 function fetch_requirement_docs(PDO $pdo, int $deptId, array $req): array
 {
@@ -140,6 +146,7 @@ function fetch_requirement_docs(PDO $pdo, int $deptId, array $req): array
     }
     return $docs;
 }
+
 
 function build_tree_node(PDO $pdo, int $deptId, ?int $folderId, array &$seenDocIds): array
 {
@@ -279,6 +286,7 @@ function build_tree_node(PDO $pdo, int $deptId, ?int $folderId, array &$seenDocI
     ];
 }
 
+
 function count_node_docs(array $node): int
 {
     $n = 0;
@@ -289,6 +297,7 @@ function count_node_docs(array $node): int
     foreach ($node['ph_groups'] as $docs) $n += count($docs);
     return $n;
 }
+
 
 function build_breadcrumb(PDO $pdo, int $deptId, int $folderId): array
 {
@@ -309,6 +318,7 @@ function build_breadcrumb(PDO $pdo, int $deptId, int $folderId): array
 /* =============================================================================
    Global search
    ============================================================================= */
+
 function search_shared_documents(PDO $pdo, ?int $scopeDeptId, string $query, int $limit = 30): array
 {
     $q = trim($query);
@@ -406,6 +416,7 @@ function search_shared_documents(PDO $pdo, ?int $scopeDeptId, string $query, int
 /* =============================================================================
    SVG icons
    ============================================================================= */
+
 function icon_folder_v2(int $size = 24): string
 {
     return '<svg xmlns="http://www.w3.org/2000/svg" width="' . $size . '" height="' . $size . '" viewBox="0 0 48 48" aria-hidden="true">'
@@ -418,6 +429,7 @@ function icon_folder_v2(int $size = 24): string
          . '</svg>';
 }
 
+
 function icon_doc_v2(int $size = 22): string
 {
     return '<svg width="' . $size . '" height="' . $size . '" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
@@ -429,6 +441,7 @@ function icon_doc_v2(int $size = 22): string
          . '</svg>';
 }
 
+
 function icon_eye(int $size = 14): string
 {
     return '<svg width="' . $size . '" height="' . $size . '" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
@@ -437,6 +450,7 @@ function icon_eye(int $size = 14): string
          .   '<circle cx="12" cy="12" r="3"/>'
          . '</svg>';
 }
+
 
 function icon_download(int $size = 14): string
 {
@@ -448,6 +462,7 @@ function icon_download(int $size = 14): string
          . '</svg>';
 }
 
+
 function icon_zip(int $size = 13): string
 {
     return '<svg width="' . $size . '" height="' . $size . '" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
@@ -458,6 +473,7 @@ function icon_zip(int $size = 13): string
          . '</svg>';
 }
 
+
 function icon_home(int $size = 14): string
 {
     return '<svg width="' . $size . '" height="' . $size . '" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
@@ -467,6 +483,7 @@ function icon_home(int $size = 14): string
          . '</svg>';
 }
 
+
 function icon_search(int $size = 16): string
 {
     return '<svg width="' . $size . '" height="' . $size . '" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
@@ -475,6 +492,7 @@ function icon_search(int $size = 16): string
          .   '<line x1="21" y1="21" x2="16.65" y2="16.65"/>'
          . '</svg>';
 }
+
 
 function icon_chevron_right(int $size = 14): string
 {
@@ -487,6 +505,7 @@ function icon_chevron_right(int $size = 14): string
 /* =============================================================================
    Rendering
    ============================================================================= */
+
 function render_doc_card(array $doc, string $rawToken, bool $isDirectUploadGroup = false, string $requirementLabel = ''): string
 {
     $displayName = trim($requirementLabel);
@@ -553,6 +572,7 @@ function render_doc_card(array $doc, string $rawToken, bool $isDirectUploadGroup
          .   '</div>'
          . '</div>';
 }
+
 
 function render_level(array $tree, string $rawToken, int $deptId): string
 {
@@ -621,6 +641,7 @@ function render_level(array $tree, string $rawToken, int $deptId): string
 /* =============================================================================
    File helpers
    ============================================================================= */
+
 function find_shared_document(PDO $pdo, ?int $scopeDeptId, string $type, int $docId): ?array
 {
     if ($type === 'ph_document') {
@@ -640,6 +661,7 @@ function find_shared_document(PDO $pdo, ?int $scopeDeptId, string $type, int $do
     return $row ?: null;
 }
 
+
 function build_safe_filename(array $doc): string
 {
     $orig = (string)($doc['filename'] ?? '');
@@ -658,6 +680,7 @@ function build_safe_filename(array $doc): string
 
     return $ext !== '' ? $base . '.' . $ext : $base;
 }
+
 
 function add_doc_flat_to_zip(ZipArchive $zip, array &$staged, array &$missing, array $doc, string $basePath): void
 {
@@ -685,6 +708,7 @@ function add_doc_flat_to_zip(ZipArchive $zip, array &$staged, array &$missing, a
     }
     $zip->addFile($src, $entry);
 }
+
 
 function add_tree_to_zip(ZipArchive $zip, array &$staged, array &$missing, array $tree, string $basePath): void
 {

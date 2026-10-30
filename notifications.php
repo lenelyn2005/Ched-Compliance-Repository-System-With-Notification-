@@ -27,13 +27,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 
     if ($_POST['action'] === 'mark_read' && isset($_POST['notification_id'])) {
         markSingleNotificationRead($pdo, (int) $_POST['notification_id'], $userId);
-        echo json_encode(['success' => true]);
+        $uid = (int) $_SESSION['user_id'];
+        unset($_SESSION['notif_count_' . $uid], $_SESSION['notif_time_' . $uid]);
+        echo json_encode(['success' => true, 'unread_count' => getUnreadNotificationCount($pdo, $uid)]);
         exit;
     }
 
     if ($_POST['action'] === 'mark_all_read') {
         markNotificationsRead($pdo, $userId);
-        echo json_encode(['success' => true]);
+        $uid = (int) $_SESSION['user_id'];
+        unset($_SESSION['notif_count_' . $uid], $_SESSION['notif_time_' . $uid]);
+        echo json_encode(['success' => true, 'unread_count' => getUnreadNotificationCount($pdo, $uid)]);
         exit;
     }
 
@@ -65,6 +69,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mark_all_read'])) {
         exit('Invalid CSRF');
     }
     markNotificationsRead($pdo, $userId);
+    $uid = (int) $_SESSION['user_id'];
+    unset($_SESSION['notif_count_' . $uid], $_SESSION['notif_time_' . $uid]);
     header('Location: notifications.php');
     exit;
 }

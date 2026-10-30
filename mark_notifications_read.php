@@ -24,5 +24,7 @@ if (!verifyCsrfToken($_POST['csrf_token'] ?? '')) {
 }
 
 markNotificationsRead($pdo, (int)$_SESSION['user_id']);
+$uid = (int)$_SESSION['user_id'];
+unset($_SESSION['notif_count_' . $uid], $_SESSION['notif_time_' . $uid]);
 header('Content-Type: application/json');
 echo json_encode(['ok' => true]);

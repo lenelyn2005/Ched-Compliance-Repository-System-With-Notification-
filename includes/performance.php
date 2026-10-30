@@ -94,19 +94,26 @@ function perf_db(): ?PDO
         return null;
     }
 
+    $dbPort = getenv('DB_PORT') ?: '3306';
+    $sslCa = getenv('DB_SSL_CA');
+    $sslOptions = [];
+    if ($sslCa && file_exists($sslCa) && is_readable($sslCa)) {
+        $sslOptions[PDO::MYSQL_ATTR_SSL_CA] = $sslCa;
+        $sslOptions[PDO::MYSQL_ATTR_SSL_VERIFY_SERVER_CERT] = true;
+    }
     try {
         $perf_pdo_instance = new PDO(
-            'mysql:host=' . DB_HOST . ';dbname=' . DB_NAME . ';charset=utf8mb4;collation=utf8mb4_unicode_ci',
+            'mysql:host=' . DB_HOST . ';port=' . $dbPort . ';dbname=' . DB_NAME . ';charset=utf8mb4;collation=utf8mb4_unicode_ci',
             $dbUser,
             $dbPass,
-            [
+            array_merge([
                 PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
                 PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
                 PDO::ATTR_EMULATE_PREPARES   => false,
                 PDO::ATTR_PERSISTENT         => true,
                 PDO::MYSQL_ATTR_INIT_COMMAND => "SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci",
                 PDO::ATTR_TIMEOUT            => 5
-            ]
+            ], $sslOptions)
         );
     } catch (PDOException $e) {
         error_log('[Performance] DB connection failed: ' . $e->getMessage());

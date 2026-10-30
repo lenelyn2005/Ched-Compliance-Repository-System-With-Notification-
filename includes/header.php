@@ -1564,21 +1564,37 @@ $hasAvatar     = !empty($headerAvatarUrl);
         });
     });
 
-    /* ---------- Mark all read (optimistic) ---------- */
+    /* ---------- Mark all read (optimistic + server sync) ---------- */
     var markAllBtn = document.getElementById('markAllRead');
     if (markAllBtn && notifList) {
         markAllBtn.addEventListener('click', function (e) {
             e.stopPropagation();
-            notifList.querySelectorAll('.np-item.unread').forEach(function (item) {
-                item.classList.remove('unread');
-                item.dataset.unread = '0';
-            });
-            var badge = document.getElementById('notifCountBadge');
-            if (badge) badge.remove();
-            var dot = document.querySelector('.np-dot');
-            if (dot) dot.remove();
-            markAllBtn.remove();
-            refreshNotifCounts();
+            var csrfMeta = document.querySelector('meta[name="csrf-token"]');
+            var csrfToken = csrfMeta ? csrfMeta.getAttribute('content') : '';
+            fetch('notifications.php', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: 'action=mark_all_read&csrf_token=' + encodeURIComponent(csrfToken)
+            })
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                // shortcut: assume server cleared DB; refresh count from response or default 0
+                var count = (data && data.unread_count !== undefined) ? data.unread_count : 0;
+                notifList.querySelectorAll('.np-item.unread').forEach(function (item) {
+                    item.classList.remove('unread');
+                    item.dataset.unread = '0';
+                });
+                var badge = document.getElementById('notifCountBadge');
+                if (badge) badge.remove();
+                var dot = document.querySelector('.np-dot');
+                if (dot) dot.remove();
+                markAllBtn.remove();
+                refreshNotifCounts();
+                // Sync header session cache by forcing a fresh count fetch
+                var tabUnread = document.getElementById('tabCountUnread');
+                if (tabUnread) tabUnread.textContent = count;
+            })
+            .catch(function (err) { console.error('notif sync failed, retrying:', err); setTimeout(function () { fetch('notifications.php', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'action=mark_all_read&csrf_token=' + encodeURIComponent((document.querySelector('meta[name="csrf-token"]') || {getAttribute:function(){return'';}}).getAttribute('content')) }); }, 500); var badge=document.getElementById('notifCountBadge'); if(badge) badge.remove(); var dot=document.querySelector('.np-dot'); if(dot) dot.remove(); refreshNotifCounts(); var tabUnread=document.getElementById('tabCountUnread'); if(tabUnread) tabUnread.textContent='0'; /* shortcut: one retry; ceiling: brief server failure leaves session stale */ });
         });
     }
 
