@@ -1367,7 +1367,11 @@ $lock_initial_pct = $lock_remaining > 0
     }
 
     const LOCK_TOTAL    = <?= (int) $lock_total ?>;   // correct window for the lock that actually fired
-    const UNLOCK_AT_MS  = <?= (int) $unlock_at_ms ?>;
+    // Server sends seconds remaining (0 = not locked); the unlock moment is
+    // computed on the browser's own clock, so server/client clock skew can
+    // never disable the form when nobody is locked.
+    const LOCK_REMAINING = <?= (int) $lock_remaining ?>;
+    const UNLOCK_AT_MS   = LOCK_REMAINING > 0 ? Date.now() + LOCK_REMAINING * 1000 : 0;
 
     function formatLockTime(totalSeconds) {
         if (totalSeconds < 0) totalSeconds = 0;

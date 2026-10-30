@@ -45,3 +45,6 @@ package.json
 
 # R2 migration ledger (operational record, contains no secrets)
 /scripts/storage/
+
+# Database dumps (contain user data) — never commit
+*.sql
