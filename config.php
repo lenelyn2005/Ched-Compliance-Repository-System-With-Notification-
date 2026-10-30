@@ -52,6 +52,16 @@ define('DB_HOST', getenv('DB_HOST') ?: '127.0.0.1');
 define('DB_NAME', getenv('DB_NAME') ?: 'ched_compliance');
 define('DB_USER', getenv('DB_USER') ?: 'ched_app');
 define('DB_PASS', getenv('DB_PASS') ?: '');
+// Managed MySQL (e.g. Aiven) uses a non-default port and requires TLS.
+// DB_SSL_CA = path to the provider's CA certificate (ca.pem). When set, the
+// connection is encrypted and the server certificate is verified.
+define('DB_PORT', (int) (getenv('DB_PORT') ?: 3306));
+define('DB_SSL_CA', trim((string) (getenv('DB_SSL_CA') ?: '')));
+define('DB_SSL_VERIFY', filter_var(getenv('DB_SSL_VERIFY') ?: 'true', FILTER_VALIDATE_BOOLEAN));
+// Optional session sql_mode override. Aiven's default includes ANSI
+// (ANSI_QUOTES, ONLY_FULL_GROUP_BY), which breaks queries written for
+// XAMPP/MariaDB. Leave empty to keep the server default.
+define('DB_SQL_MODE', trim((string) (getenv('DB_SQL_MODE') ?: '')));
 
 // File storage settings — files stored outside public web root
 define('SECURE_STORAGE_PATH', getenv('SECURE_STORAGE_PATH') ?: 'C:\\ched_secure_storage\\documents\\');

@@ -54,6 +54,12 @@ function csp_directives(): array
     // shortcut: allows both schemes for configured endpoint; upgrade when endpoint is HTTPS-only.
     $wsDev = 'ws://' . $wsHost . ':' . $wsPort;
     $wsProd = 'wss://' . $wsHost . ':' . $wsPort;
+    // Same-origin WebSocket behind a proxy path (Render): allow wss://APP_HOST.
+    $appHost = trim((string) (getenv('APP_HOST') ?: ''));
+    if ((getenv('WS_PUBLIC_PATH') ?: '') !== '' && $appHost !== '') {
+        $wsDev = 'wss://' . $appHost;
+        $wsProd = 'wss://' . $appHost;
+    }
     return [
         "default-src 'self'",
         "script-src 'self' 'nonce-$nonce' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net",

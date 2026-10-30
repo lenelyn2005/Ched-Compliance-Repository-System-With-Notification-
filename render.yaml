@@ -1,0 +1,89 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+# Deploy: Render Dashboard → New → Blueprint → pick this repo.
+# Values marked `sync: false` are prompted for on first deploy (secrets).
+services:
+  - type: web
+    name: ched-compliance
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    region: singapore          # closest Render region to PH; pick the same region family on Aiven
+    plan: starter              # "free" works for testing but sleeps after 15 min idle
+    healthCheckPath: /healthz.php
+    autoDeploy: true
+    envVars:
+      # --- App ---------------------------------------------------------------
+      - key: APP_ENV
+        value: production
+      - key: APP_DEBUG
+        value: "false"
+      - key: APP_HOST                # e.g. ched-compliance.onrender.com (no https://)
+        sync: false
+
+      # --- Aiven MySQL ---------------------------------------------------------
+      - key: DB_HOST                 # e.g. mysql-xxxx-yourproject.k.aivencloud.com
+        sync: false
+      - key: DB_PORT                 # Aiven port, e.g. 12345 (NOT 3306)
+        sync: false
+      - key: DB_NAME
+        value: ched_compliance
+      - key: DB_USER                 # avnadmin, or a dedicated user you created
+        sync: false
+      - key: DB_PASS
+        sync: false
+      # Add Aiven's ca.pem as a Render Secret File named "ca.pem";
+      # it is mounted at /etc/secrets/ca.pem.
+      - key: DB_SSL_CA
+        value: /etc/secrets/ca.pem
+      # Aiven's default sql_mode includes ANSI; use XAMPP/MariaDB-like mode.
+      - key: DB_SQL_MODE
+        value: STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION
+
+      # --- Cloudflare R2 (document storage) ------------------------------------
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_ENDPOINT
+        sync: false
+      - key: R2_REGION
+        value: auto
+      - key: R2_BUCKET_NAME
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+
+      # --- SMTP ------------------------------------------------------------------
+      - key: SMTP_HOST
+        value: smtp.gmail.com
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: SMTP_FROM
+        sync: false
+      - key: SMTP_FROM_NAME
+        value: CHED Compliance System
+
+      # --- Realtime notifications (WebSocket via wss://APP_HOST/ws) -------------
+      - key: WS_SECRET
+        generateValue: true
+      - key: WS_INTERNAL_SECRET
+        generateValue: true
+      - key: WS_PUBLIC_PATH
+        value: /ws
+
+      # --- Background email worker (runs inside the container) ----------------
+      - key: EMAIL_DISABLE_SPAWN
+        value: "1"
+      - key: EMAIL_QUEUE_INTERVAL
+        value: "30"
+
+    # Profile pictures are stored on local disk (uploads/avatars). Without a
+    # persistent disk they reset on every deploy. Paid plans can attach one:
+    # disk:
+    #   name: ched-uploads
+    #   mountPath: /var/www/html/uploads
+    #   sizeGB: 1
