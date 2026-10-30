@@ -290,13 +290,19 @@ function spawnEmailWorker(int $minIntervalSeconds = 2): bool
     // Prefer php-win.exe (GUI subsystem) — it NEVER opens a console, so no
     // black php.exe pop-up under Apache. Falls back to php.exe with
     // create_no_window as belt-and-braces for non-XAMPP installs.
-    $binary = PHP_BINARY;
-    $winBinary = dirname($binary) . DIRECTORY_SEPARATOR . 'php-win.exe';
-    if (is_file($winBinary)) {
-        $binary = $winBinary;
+    $isWindows = DIRECTORY_SEPARATOR === '\\';
+    if ($isWindows) {
+        $binary = PHP_BINARY;
+        $winBinary = dirname($binary) . DIRECTORY_SEPARATOR . 'php-win.exe';
+        if (is_file($winBinary)) {
+            $binary = $winBinary;
+        }
+    } else {
+        // Under Apache mod_php PHP_BINARY is empty, so resolve the CLI binary.
+        $binary = getenv('PHP_CLI_BINARY') ?: PHP_BINDIR . '/php';
     }
     $descriptors = [
-        0 => ['file', 'NUL', 'r'],
+        0 => ['file', $isWindows ? 'NUL' : '/dev/null', 'r'],
         1 => ['file', $outLog, 'a'],
         2 => ['file', $outLog, 'a'],
     ];

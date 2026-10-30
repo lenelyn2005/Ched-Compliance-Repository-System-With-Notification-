@@ -235,6 +235,7 @@ $hasAvatar     = !empty($headerAvatarUrl);
     <script nonce="<?= csp_nonce() ?>">
         window.WS_HOST = <?= json_encode(getenv('WS_HOST') ?: 'localhost', JSON_UNESCAPED_SLASHES) ?>;
         window.WS_PORT = <?= json_encode((string)(getenv('WS_PORT') ?: '8080'), JSON_UNESCAPED_SLASHES) ?>;
+        window.WS_PATH = <?= json_encode((string)(getenv('WS_PUBLIC_PATH') ?: ''), JSON_UNESCAPED_SLASHES) ?>;
     </script>
     <title><?= $pageTitle ?? 'CHED Compliance Repository' ?></title>
     <meta name="description"

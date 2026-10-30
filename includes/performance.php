@@ -115,12 +115,44 @@ function perf_db(): ?PDO
                 PDO::ATTR_TIMEOUT            => 5
             ], $sslOptions)
         );
+    $dsn = 'mysql:host=' . DB_HOST
+        . ';port=' . (defined('DB_PORT') ? (int) DB_PORT : 3306)
+        . ';dbname=' . DB_NAME . ';charset=utf8mb4';
+
+    $initCommand = "SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci";
+    if (defined('DB_SQL_MODE') && DB_SQL_MODE !== '') {
+        $initCommand .= ", SESSION sql_mode = '" . str_replace("'", '', DB_SQL_MODE) . "'";
+    }
+
+    $options = [
+        PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
+        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+        PDO::ATTR_EMULATE_PREPARES   => false,
+        PDO::ATTR_PERSISTENT         => true,
+        PDO::MYSQL_ATTR_INIT_COMMAND => $initCommand,
+        PDO::ATTR_TIMEOUT            => 10,
+    ];
+
+    // TLS for managed databases (Aiven requires it).
+    if (defined('DB_SSL_CA') && DB_SSL_CA !== '') {
+        if (!is_readable(DB_SSL_CA)) {
+            error_log('[Performance] DB_SSL_CA is set but not readable: ' . DB_SSL_CA);
+            return null;
+        }
+        $options[PDO::MYSQL_ATTR_SSL_CA] = DB_SSL_CA;
+        $options[PDO::MYSQL_ATTR_SSL_VERIFY_SERVER_CERT] = defined('DB_SSL_VERIFY') ? (bool) DB_SSL_VERIFY : true;
+    }
+}
+
+    try {
+        $perf_pdo_instance = new PDO($dsn, $dbUser, $dbPass, $options);
     } catch (PDOException $e) {
         error_log('[Performance] DB connection failed: ' . $e->getMessage());
         return null;
     }
     
     return $perf_pdo_instance;
+
 }
 
 function db_query(string $sql, array $params = [], int $ttl = 300): array|false

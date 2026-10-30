@@ -7,7 +7,12 @@
     if (!window.CHED) window.CHED = {};
     const CHED = window.CHED;
 
-    const WS_HOST = (window.location.protocol === 'https:' ? 'wss://' : 'ws://') + ((window.WS_HOST || 'localhost') + ':' + (window.WS_PORT || '8080'));
+    const WS_SCHEME = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+    // WS_PATH set (e.g. "/ws" on Render): same-origin, proxied by Apache.
+    // Otherwise connect to a dedicated host:port (local XAMPP setup).
+    const WS_HOST = window.WS_PATH
+        ? WS_SCHEME + window.location.host + window.WS_PATH
+        : WS_SCHEME + (window.WS_HOST || 'localhost') + ':' + (window.WS_PORT || '8080');
     const CSRF_TOKEN = document.querySelector('meta[name="csrf-token"]') ? document.querySelector('meta[name="csrf-token"]').content : '';
 
     let ws = null;
