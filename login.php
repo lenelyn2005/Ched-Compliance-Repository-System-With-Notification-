@@ -2922,9 +2922,6 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
     /* ============================================================
        Lockout countdown
        ============================================================ */
-    const LOCK_TOTAL    = <?= (int) $lock_total ?>;
-    const UNLOCK_AT_MS  = <?= (int) $unlock_at_ms ?>;
-
     function formatLockTime(totalSeconds) {
         if (totalSeconds < 0) totalSeconds = 0;
         const m = Math.floor(totalSeconds / 60);
