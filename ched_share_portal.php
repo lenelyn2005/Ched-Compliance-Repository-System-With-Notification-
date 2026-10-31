@@ -1467,7 +1467,7 @@ body::after{
   gap:40px;flex-wrap:wrap;
   max-width:1440px;margin:0 auto;width:100%;
 }
-.hero-left{min-width:0;flex:1;max-width:720px}
+.hero-left{min-width:0;flex:1;max-width:520px}
 .hero-eyebrow{
   display:inline-flex;align-items:center;gap:8px;
   font-size:.72rem;font-weight:700;
@@ -1604,14 +1604,14 @@ body::after{
 /* DEPT CARDS */
 .dept-grid{
   display:grid;
-  grid-template-columns:repeat(auto-fill,minmax(340px,1fr));
-  gap:20px;
+  grid-template-columns:repeat(auto-fill,minmax(260px,1fr));
+  gap:12px;
 }
 .dept-card{
   background:var(--paper);border:1px solid var(--line);
-  border-radius:var(--radius-lg);padding:26px;
+  border-radius:var(--radius-lg);padding:16px;
   position:relative;overflow:hidden;text-decoration:none;color:inherit;
-  display:flex;flex-direction:column;gap:18px;
+  display:flex;flex-direction:column;gap:10px;
   box-shadow:var(--shadow-sm);
   transition:all .3s var(--ease);
   isolation:isolate;
@@ -1689,12 +1689,12 @@ body::after{
 
 /* FOLDER TILES */
 .folders-grid{
-  display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));
-  gap:14px;margin-bottom:36px;
+  display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));
+  gap:10px;margin-bottom:24px;
 }
 .folder-tile{
   background:var(--paper);border:1px solid var(--line);
-  border-radius:var(--radius);padding:16px;
+  border-radius:var(--radius);padding:10px;
   display:flex;align-items:center;gap:12px;
   transition:all .22s var(--ease);
   box-shadow:var(--shadow-sm);position:relative;
@@ -1739,10 +1739,10 @@ body::after{
 /* DOC CARDS — COMPACT */
 .req-section{margin-bottom:32px}
 .req-section:last-child{margin-bottom:0}
-.docs-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px}
+.docs-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px}
 .doc-card{
   background:var(--paper);border:1px solid var(--line);
-  border-radius:10px;padding:9px 10px;
+  border-radius:10px;padding:6px 8px;
   display:flex;align-items:center;gap:10px;
   position:relative;overflow:hidden;
   transition:all .2s var(--ease);
