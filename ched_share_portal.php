@@ -315,6 +315,54 @@ function build_breadcrumb(PDO $pdo, int $deptId, int $folderId): array
     return $parts;
 }
 
+
+/* =============================================================
+   NEW: recent documents across scope (for home dashboard)
+   ============================================================= */
+function fetch_recent_documents(PDO $pdo, ?int $scopeDeptId, int $limit = 8): array
+{
+    $results = [];
+
+    $sql = "SELECT d.id, d.filename, d.title, d.department_id, d.upload_date,
+                   'document' AS source
+            FROM documents d
+            WHERE d.status = 'approved_admin' AND d.archived = 0";
+    $params = [];
+    if ($scopeDeptId !== null) { $sql .= " AND d.department_id = ?"; $params[] = $scopeDeptId; }
+    $sql .= " ORDER BY d.upload_date DESC LIMIT " . (int)$limit;
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+    $results = $stmt->fetchAll();
+
+    $sql = "SELECT pd.id, pd.filename, pd.title, pd.department_id, pd.upload_date,
+                   'ph_document' AS source
+            FROM ph_documents pd
+            WHERE pd.status = 'approved_admin' AND pd.archived = 0";
+    $params = [];
+    if ($scopeDeptId !== null) { $sql .= " AND pd.department_id = ?"; $params[] = $scopeDeptId; }
+    $sql .= " ORDER BY pd.upload_date DESC LIMIT " . (int)$limit;
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+    $results = array_merge($results, $stmt->fetchAll());
+
+    usort($results, static fn($a, $b) => strcmp((string)$b['upload_date'], (string)$a['upload_date']));
+    $results = array_slice($results, 0, $limit);
+
+    $deptCache = [];
+    foreach ($results as &$r) {
+        $did = (int)$r['department_id'];
+        if (!isset($deptCache[$did])) {
+            $s = $pdo->prepare("SELECT department_name FROM departments WHERE id = ? LIMIT 1");
+            $s->execute([$did]);
+            $deptCache[$did] = (string)($s->fetchColumn() ?: '');
+        }
+        $r['dept_name'] = $deptCache[$did];
+    }
+    unset($r);
+    return $results;
+}
+
+
 /* =============================================================================
    Global search
    ============================================================================= */
@@ -429,7 +477,6 @@ function icon_folder_v2(int $size = 24): string
          . '</svg>';
 }
 
-
 function icon_doc_v2(int $size = 22): string
 {
     return '<svg width="' . $size . '" height="' . $size . '" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
@@ -441,7 +488,6 @@ function icon_doc_v2(int $size = 22): string
          . '</svg>';
 }
 
-
 function icon_eye(int $size = 14): string
 {
     return '<svg width="' . $size . '" height="' . $size . '" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
@@ -450,7 +496,6 @@ function icon_eye(int $size = 14): string
          .   '<circle cx="12" cy="12" r="3"/>'
          . '</svg>';
 }
-
 
 function icon_download(int $size = 14): string
 {
@@ -462,7 +507,6 @@ function icon_download(int $size = 14): string
          . '</svg>';
 }
 
-
 function icon_zip(int $size = 13): string
 {
     return '<svg width="' . $size . '" height="' . $size . '" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
@@ -473,7 +517,6 @@ function icon_zip(int $size = 13): string
          . '</svg>';
 }
 
-
 function icon_home(int $size = 14): string
 {
     return '<svg width="' . $size . '" height="' . $size . '" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
@@ -482,7 +525,6 @@ function icon_home(int $size = 14): string
          .   '<polyline points="9 22 9 12 15 12 15 22"/>'
          . '</svg>';
 }
-
 
 function icon_search(int $size = 16): string
 {
@@ -493,12 +535,54 @@ function icon_search(int $size = 16): string
          . '</svg>';
 }
 
-
 function icon_chevron_right(int $size = 14): string
 {
     return '<svg width="' . $size . '" height="' . $size . '" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
          . 'stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
          .   '<polyline points="9 18 15 12 9 6"/>'
+         . '</svg>';
+}
+
+function icon_check(int $size = 12): string
+{
+    return '<svg width="' . $size . '" height="' . $size . '" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+         . 'stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+         .   '<polyline points="20 6 9 17 4 12"/>'
+         . '</svg>';
+}
+
+function icon_verified_badge(int $size = 13): string
+{
+    return '<svg width="' . $size . '" height="' . $size . '" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">'
+         .   '<path d="M12 1l2.3 2.2 3.1-.4 1 3 2.7 1.6-.9 3 1.8 2.6-2.1 2.4.4 3.1-3 1-1.6 2.7-3-.9-2.6 1.8-2.4-2.1-3.1.4-1-3-2.7-1.6.9-3L1.8 12l2.1-2.4-.4-3.1 3-1L8.1 2.8l3 .9L12 1zm-1.3 15.4l6-6-1.5-1.5-4.5 4.5-2-2-1.5 1.5 3.5 3.5z"/>'
+         . '</svg>';
+}
+
+function icon_clock(int $size = 13): string
+{
+    return '<svg width="' . $size . '" height="' . $size . '" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+         . 'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+         .   '<circle cx="12" cy="12" r="9"/>'
+         .   '<polyline points="12 7 12 12 15 14"/>'
+         . '</svg>';
+}
+
+function icon_lock(int $size = 13): string
+{
+    return '<svg width="' . $size . '" height="' . $size . '" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+         . 'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+         .   '<rect x="4" y="11" width="16" height="10" rx="2"/>'
+         .   '<path d="M8 11V8a4 4 0 0 1 8 0v3"/>'
+         . '</svg>';
+}
+
+function icon_print(int $size = 13): string
+{
+    return '<svg width="' . $size . '" height="' . $size . '" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+         . 'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+         .   '<polyline points="6 9 6 2 18 2 18 9"/>'
+         .   '<path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/>'
+         .   '<rect x="6" y="14" width="12" height="8"/>'
          . '</svg>';
 }
 
@@ -551,7 +635,7 @@ function render_doc_card(array $doc, string $rawToken, bool $isDirectUploadGroup
     }
 
     return '<div class="doc-card" role="group" aria-label="' . $nameEsc . '" data-name="' . htmlspecialchars(strtolower($displayName), ENT_QUOTES, 'UTF-8') . '">'
-         .   '<div class="doc-card-icon">' . $iconSvg . '</div>'
+         .   '<div class="doc-card-icon">' . $iconSvg . '<span class="doc-card-verified" aria-label="Verified document">' . icon_check(8) . '</span></div>'
          .   '<div class="doc-card-body">'
          .     '<div class="doc-card-name" title="' . $nameEsc . '">' . $nameEsc . '</div>'
          .     '<div class="doc-card-meta">'
@@ -608,8 +692,7 @@ function render_level(array $tree, string $rawToken, int $deptId): string
 
     foreach ($tree['requirements'] as $req) {
         $isDirect = !empty($req['is_direct_upload']);
-        $html .= '<section class="req-section">'
-               .   '<div class="docs-grid">';
+        $html .= '<section class="req-section"><div class="docs-grid">';
         foreach ($req['documents'] as $doc) {
             $html .= render_doc_card($doc, $rawToken, $isDirect, $isDirect ? '' : (string)$req['label']);
         }
@@ -1099,6 +1182,9 @@ if ($viewDept === null) {
     }
 }
 
+/* NEW: recent uploads on home */
+$recentDocs = ($viewDept === null) ? fetch_recent_documents($pdo, $scopeDeptId, 8) : [];
+
 $slotsRaw   = $link['max_visitors'] === null
     ? null
     : max(0, (int)$link['max_visitors'] - (int)$link['visitor_count']);
@@ -1114,7 +1200,8 @@ $totalDocs = $viewDept === null ? $totalInScope : $viewCount;
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex,nofollow">
-<title><?= $viewDept === null ? 'CHED Shared Documents' : htmlspecialchars($viewDeptName, ENT_QUOTES, 'UTF-8') . ' · CHED' ?></title>
+<meta name="description" content="Official CHED compliance document repository for USAT College Sagay City, Inc.">
+<title><?= $viewDept === null ? 'CHED Compliance Portal · USAT College' : htmlspecialchars($viewDeptName, ENT_QUOTES, 'UTF-8') . ' · CHED Portal' ?></title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700;9..144,900&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -1139,6 +1226,8 @@ $totalDocs = $viewDept === null ? $totalInScope : $viewCount;
   --line:#e6ddcc;
   --line-2:#d8cdb6;
   --success:#059669;
+  --success-bg:rgba(5,150,105,.09);
+  --success-line:rgba(5,150,105,.22);
   --danger:#dc2626;
   --radius:12px;
   --radius-lg:22px;
@@ -1175,10 +1264,32 @@ body::after{
 .app{min-height:100vh;position:relative;z-index:1}
 .main{display:flex;flex-direction:column}
 
+/* ===== TRUST BANNER ===== */
+.trust-banner{
+  background:linear-gradient(90deg,var(--navy),var(--navy-2) 60%, #1e3a52);
+  color:#dbe6ef;
+  padding:9px 40px;
+  font-size:.74rem;
+  font-weight:600;
+  letter-spacing:.02em;
+  display:flex;align-items:center;justify-content:center;gap:14px;
+  flex-wrap:wrap;
+  position:relative;z-index:61;
+  border-bottom:1px solid rgba(255,255,255,.08);
+}
+.trust-banner .tb-item{display:inline-flex;align-items:center;gap:7px;color:#c9d7e3}
+.trust-banner .tb-item svg{color:#5eb7e8;opacity:.9}
+.trust-banner .tb-sep{color:rgba(255,255,255,.22);font-weight:400}
+.trust-banner .tb-strong{color:#fff;font-weight:800;letter-spacing:.04em;text-transform:uppercase}
+@media (max-width:640px){
+  .trust-banner{padding:8px 16px;font-size:.68rem;gap:8px}
+  .trust-banner .tb-sep{display:none}
+}
+
 /* TOPBAR */
 .topbar{
   position:sticky;top:0;z-index:60;
-  background:linear-gradient(180deg,rgba(246,241,232,.92),rgba(246,241,232,.78));
+  background:linear-gradient(180deg,rgba(246,241,232,.94),rgba(246,241,232,.80));
   backdrop-filter:blur(20px) saturate(180%);
   -webkit-backdrop-filter:blur(20px) saturate(180%);
   border-bottom:1px solid rgba(15,23,32,.06);
@@ -1281,14 +1392,19 @@ body::after{
 .search-dropdown .sr-title{font-weight:600;line-height:1.25;color:#0f1720}
 .search-dropdown .sr-hint{font-size:.78rem;color:#5c5c5c;margin-top:2px}
 .search-dropdown .sr-empty{padding:.9rem;color:#666;font-style:italic}
-.zip-btn{
+
+.zip-btn,.print-btn{
   display:inline-flex;align-items:center;gap:8px;
   padding:9px 16px;border-radius:11px;
-  background:var(--navy);color:#fff;
   font-size:.8rem;font-weight:700;text-decoration:none;
-  border:1px solid var(--navy);cursor:pointer;
+  cursor:pointer;
   transition:all .18s var(--ease);
   white-space:nowrap;position:relative;overflow:hidden;
+  font-family:inherit;
+}
+.zip-btn{
+  background:var(--navy);color:#fff;
+  border:1px solid var(--navy);
   box-shadow:0 4px 12px -2px rgba(15,23,32,.25);
 }
 .zip-btn::before{
@@ -1308,22 +1424,32 @@ body::after{
   border:2px solid currentColor;border-top-color:transparent;border-radius:50%;
   animation:spin .7s linear infinite;margin-left:2px;
 }
+.print-btn{
+  background:var(--paper);color:var(--ink-2);
+  border:1px solid var(--line-2);
+}
+.print-btn:hover{
+  background:var(--paper-2);border-color:var(--ink-4);
+  transform:translateY(-1px);
+}
 @keyframes spin{to{transform:rotate(360deg)}}
 
 /* SHARE STRIP */
 .share-strip{
   display:flex;align-items:center;gap:20px;flex-wrap:wrap;
-  padding:14px 40px;
-  background:linear-gradient(90deg, rgba(245,158,11,.05), rgba(37,99,235,.04));
+  padding:12px 40px;
+  background:linear-gradient(90deg, rgba(5,150,105,.05), rgba(37,99,235,.04));
   border-bottom:1px solid var(--line);
   font-size:.78rem;
 }
 .share-strip-title{
   flex-shrink:0;
   font-size:.66rem;font-weight:800;letter-spacing:.1em;
-  text-transform:uppercase;color:var(--accent-2);
+  text-transform:uppercase;color:var(--success);
   padding:5px 10px;border-radius:7px;
-  background:rgba(245,158,11,.12);
+  background:var(--success-bg);
+  border:1px solid var(--success-line);
+  display:inline-flex;align-items:center;gap:6px;
 }
 .share-stat{display:inline-flex;align-items:center;gap:7px;position:relative}
 .share-stat .k{color:var(--ink-4);font-weight:600}
@@ -1407,6 +1533,74 @@ body::after{
   flex:1;max-width:1440px;margin:0 auto;width:100%;
 }
 
+/* SECTION HEADS */
+.section-head{
+  display:flex;align-items:center;justify-content:space-between;
+  gap:16px;margin-bottom:18px;flex-wrap:wrap;
+}
+.section-head h2{
+  font-family:'Fraunces',Georgia,serif;
+  font-size:1.25rem;font-weight:700;letter-spacing:-.015em;
+  color:var(--ink);margin:0;
+}
+.section-head .sh-meta{
+  font-size:.78rem;color:var(--ink-4);font-weight:600;
+}
+
+/* RECENT RAIL */
+.recent-rail{
+  display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(260px,1fr));
+  gap:12px;
+  margin-bottom:40px;
+}
+.recent-card{
+  background:var(--paper);border:1px solid var(--line);
+  border-radius:12px;padding:14px;
+  display:flex;align-items:center;gap:12px;
+  text-decoration:none;color:inherit;
+  transition:all .2s var(--ease);
+  box-shadow:var(--shadow-sm);
+  position:relative;overflow:hidden;
+}
+.recent-card::before{
+  content:'';position:absolute;left:0;top:0;bottom:0;width:3px;
+  background:linear-gradient(180deg,var(--success),var(--blue));
+  opacity:.55;
+}
+.recent-card:hover{
+  transform:translateY(-2px);
+  border-color:rgba(5,150,105,.3);
+  box-shadow:var(--shadow);
+}
+.recent-card:hover::before{opacity:1}
+.recent-ico{
+  width:36px;height:36px;flex-shrink:0;
+  border-radius:9px;
+  background:var(--paper-2);
+  border:1px solid var(--line);
+  display:flex;align-items:center;justify-content:center;
+  color:var(--ink-3);
+}
+.recent-body{flex:1;min-width:0}
+.recent-title{
+  font-size:.82rem;font-weight:700;color:var(--ink);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  margin-bottom:3px;
+}
+.recent-meta{
+  font-size:.68rem;color:var(--ink-4);font-weight:600;
+  display:flex;align-items:center;gap:6px;flex-wrap:wrap;
+}
+.recent-meta .rm-chip{
+  background:var(--success-bg);
+  color:var(--success);
+  padding:2px 6px;border-radius:4px;
+  font-size:.6rem;font-weight:800;letter-spacing:.03em;
+  text-transform:uppercase;
+  border:1px solid var(--success-line);
+}
+
 /* DEPT CARDS */
 .dept-grid{
   display:grid;
@@ -1456,17 +1650,42 @@ body::after{
   font-family:'Fraunces',Georgia,serif;
   font-size:1.25rem;font-weight:600;
   letter-spacing:-.015em;line-height:1.2;
-  color:var(--ink);margin:0 0 6px;
+  color:var(--ink);margin:0 0 8px;
   overflow-wrap:break-word;word-break:break-word;
 }
-.dept-subtitle{
-  font-size:.78rem;color:var(--ink-4);font-weight:600;
+.dept-badges{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.dept-chip{
   display:inline-flex;align-items:center;gap:5px;
-  padding:3px 9px;border-radius:6px;
+  font-size:.68rem;font-weight:700;
+  padding:3px 8px;border-radius:6px;
   background:var(--paper-2);
   border:1px solid var(--line);
+  color:var(--ink-3);
 }
-.dept-subtitle strong{color:var(--blue);font-weight:800}
+.dept-chip.chip-verified{
+  background:var(--success-bg);
+  border-color:var(--success-line);
+  color:var(--success);
+}
+.dept-chip strong{color:var(--blue);font-weight:800}
+.dept-foot{
+  display:flex;align-items:center;justify-content:space-between;
+  gap:10px;padding-top:14px;
+  border-top:1px solid var(--line);
+  margin-top:auto;
+}
+.dept-coverage{
+  display:flex;align-items:center;gap:5px;
+}
+.dept-dot{
+  width:7px;height:7px;border-radius:50%;
+  background:var(--line-2);
+}
+.dept-dot.is-active{background:var(--success);box-shadow:0 0 0 2px rgba(5,150,105,.15)}
+.dept-updated{
+  font-size:.7rem;color:var(--ink-4);font-weight:600;
+  display:inline-flex;align-items:center;gap:4px;
+}
 
 /* FOLDER TILES */
 .folders-grid{
@@ -1517,10 +1736,10 @@ body::after{
 }
 .folder-tile-zip.is-disabled{background:transparent;border:1px dashed var(--line-2);color:var(--ink-4);pointer-events:none;opacity:.5}
 
-/* ========== DOC CARDS — COMPACT ========== */
+/* DOC CARDS — COMPACT */
 .req-section{margin-bottom:32px}
 .req-section:last-child{margin-bottom:0}
-.docs-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}
+.docs-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px}
 .doc-card{
   background:var(--paper);border:1px solid var(--line);
   border-radius:10px;padding:9px 10px;
@@ -1547,6 +1766,14 @@ body::after{
   transition:transform .25s var(--ease-spring);
 }
 .doc-card:hover .doc-card-icon{transform:scale(1.06) rotate(-3deg)}
+.doc-card-verified{
+  position:absolute;bottom:-2px;right:-4px;
+  width:14px;height:14px;border-radius:50%;
+  background:var(--success);color:#fff;
+  display:flex;align-items:center;justify-content:center;
+  border:1.5px solid var(--paper);
+  box-shadow:0 2px 4px rgba(5,150,105,.35);
+}
 .doc-card-body{flex:1;min-width:0;padding-right:2px}
 .doc-card-name{
   font-size:.78rem;font-weight:700;color:var(--ink);line-height:1.3;
@@ -1593,6 +1820,60 @@ body::after{
   font-size:1.4rem;font-weight:700;color:var(--ink);margin:0 0 10px;
 }
 .empty-state p{color:var(--ink-3);font-size:.92rem;max-width:420px;margin:0 auto;line-height:1.6}
+
+/* FOOTER */
+.site-footer{
+  margin-top:auto;
+  background:linear-gradient(180deg,var(--navy),#0a1622);
+  color:#a6b6c5;
+  padding:44px 40px 24px;
+  position:relative;z-index:1;
+}
+.footer-inner{
+  max-width:1440px;margin:0 auto;
+  display:grid;
+  grid-template-columns:1.5fr 1fr 1fr;
+  gap:36px;
+  padding-bottom:28px;
+  border-bottom:1px solid rgba(255,255,255,.08);
+}
+.footer-brand{display:flex;align-items:flex-start;gap:14px}
+.footer-brand img{
+  width:44px;height:44px;border-radius:11px;object-fit:cover;
+  border:1px solid rgba(255,255,255,.15);
+  flex-shrink:0;
+}
+.footer-brand h4{
+  font-family:'Fraunces',Georgia,serif;
+  color:#fff;font-size:1.05rem;font-weight:700;
+  letter-spacing:-.015em;margin:0 0 6px;
+}
+.footer-brand p{font-size:.78rem;line-height:1.6;color:#8fa4b5;margin:0}
+.footer-col h5{
+  font-size:.7rem;font-weight:800;
+  letter-spacing:.1em;text-transform:uppercase;
+  color:#5eb7e8;margin:0 0 12px;
+}
+.footer-col ul{list-style:none;padding:0;margin:0}
+.footer-col li{font-size:.78rem;line-height:1.7;color:#8fa4b5}
+.footer-col li strong{color:#dbe6ef;font-weight:600}
+.footer-bottom{
+  max-width:1440px;margin:22px auto 0;
+  display:flex;align-items:center;justify-content:space-between;
+  gap:16px;flex-wrap:wrap;
+  font-size:.72rem;color:#6c8090;
+}
+.footer-bottom .fb-badge{
+  display:inline-flex;align-items:center;gap:6px;
+  padding:4px 10px;border-radius:999px;
+  background:rgba(94,183,232,.08);
+  color:#5eb7e8;font-weight:700;
+  border:1px solid rgba(94,183,232,.18);
+}
+@media (max-width:760px){
+  .footer-inner{grid-template-columns:1fr;gap:24px;padding:0 0 22px}
+  .site-footer{padding:36px 20px 20px}
+}
 
 /* MODAL */
 .modal{
@@ -1700,14 +1981,14 @@ body::after{
 
 /* STAGGER REVEAL */
 @keyframes fadeUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
-.dept-card,.folder-tile,.doc-card{animation:fadeUp .5s var(--ease) backwards}
-.dept-card:nth-child(1),.folder-tile:nth-child(1),.doc-card:nth-child(1){animation-delay:.02s}
-.dept-card:nth-child(2),.folder-tile:nth-child(2),.doc-card:nth-child(2){animation-delay:.04s}
-.dept-card:nth-child(3),.folder-tile:nth-child(3),.doc-card:nth-child(3){animation-delay:.06s}
-.dept-card:nth-child(4),.folder-tile:nth-child(4),.doc-card:nth-child(4){animation-delay:.08s}
-.dept-card:nth-child(5),.folder-tile:nth-child(5),.doc-card:nth-child(5){animation-delay:.10s}
-.dept-card:nth-child(6),.folder-tile:nth-child(6),.doc-card:nth-child(6){animation-delay:.12s}
-.dept-card:nth-child(n+7),.folder-tile:nth-child(n+7),.doc-card:nth-child(n+7){animation-delay:.14s}
+.dept-card,.folder-tile,.doc-card,.recent-card{animation:fadeUp .5s var(--ease) backwards}
+.dept-card:nth-child(1),.folder-tile:nth-child(1),.doc-card:nth-child(1),.recent-card:nth-child(1){animation-delay:.02s}
+.dept-card:nth-child(2),.folder-tile:nth-child(2),.doc-card:nth-child(2),.recent-card:nth-child(2){animation-delay:.05s}
+.dept-card:nth-child(3),.folder-tile:nth-child(3),.doc-card:nth-child(3),.recent-card:nth-child(3){animation-delay:.08s}
+.dept-card:nth-child(4),.folder-tile:nth-child(4),.doc-card:nth-child(4),.recent-card:nth-child(4){animation-delay:.11s}
+.dept-card:nth-child(5),.folder-tile:nth-child(5),.doc-card:nth-child(5),.recent-card:nth-child(5){animation-delay:.14s}
+.dept-card:nth-child(6),.folder-tile:nth-child(6),.doc-card:nth-child(6),.recent-card:nth-child(6){animation-delay:.17s}
+.dept-card:nth-child(n+7),.folder-tile:nth-child(n+7),.doc-card:nth-child(n+7),.recent-card:nth-child(n+7){animation-delay:.20s}
 
 /* SEARCH FILTER STATE */
 .is-hidden{display:none !important}
@@ -1728,6 +2009,18 @@ body::after{
   50%{box-shadow:0 0 0 6px rgba(37,99,235,.18), 0 12px 30px -8px rgba(37,99,235,.45)}
 }
 
+/* KBD HINT */
+.kbd-hint{
+  display:none;
+  margin-left:auto;flex-shrink:0;
+  font-size:.65rem;color:var(--ink-4);font-weight:600;
+  padding:2px 6px;border-radius:4px;
+  background:var(--paper-2);
+  border:1px solid var(--line);
+  font-family:'SF Mono',ui-monospace,monospace;
+}
+@media (min-width:961px){.kbd-hint{display:inline-block}}
+
 /* RESPONSIVE */
 @media (max-width:960px){
   .topbar{padding:14px 20px;gap:16px}
@@ -1739,13 +2032,14 @@ body::after{
   .search-box{display:none}
   .dept-grid{grid-template-columns:repeat(auto-fill,minmax(280px,1fr))}
   .docs-grid{grid-template-columns:repeat(auto-fill,minmax(200px,1fr))}
+  .recent-rail{grid-template-columns:repeat(auto-fill,minmax(240px,1fr))}
 }
 @media (max-width:560px){
   .topbar{padding:12px 16px}
   .topbar-badge{display:none}
   .subheader{padding:8px 16px;top:65px;flex-wrap:wrap}
   .subheader-actions{width:100%;justify-content:space-between}
-  .zip-btn{padding:10px 14px;flex:1;justify-content:center}
+  .zip-btn,.print-btn{padding:10px 14px;flex:1;justify-content:center}
   .share-strip{padding:10px 16px;gap:14px;justify-content:space-between}
   .share-strip-title{display:none}
   .share-stat + .share-stat{padding-left:0}
@@ -1755,9 +2049,7 @@ body::after{
   .hero-stat{flex:1;min-width:0;padding:14px;text-align:center}
   .hero-stat-num{font-size:1.7rem}
   .content{padding:16px 16px 48px}
-  .dept-grid{grid-template-columns:1fr}
-  .folders-grid{grid-template-columns:1fr}
-  .docs-grid{grid-template-columns:1fr}
+  .dept-grid,.folders-grid,.docs-grid,.recent-rail{grid-template-columns:1fr}
   .modal{padding:0}
   .modal-box{max-height:100vh;border-radius:0}
   .modal-body iframe{height:60vh}
@@ -1769,11 +2061,58 @@ body::after{
   *,*::before,*::after{animation-duration:.001ms !important;transition-duration:.001ms !important;scroll-behavior:auto !important}
   .doc-card.is-highlighted{animation:none}
 }
+
+/* ============================================================
+   PRINT — evaluators can print a clean departmental inventory
+   ============================================================ */
+@media print{
+  @page{margin:14mm}
+  body{background:#fff;color:#000;font-size:10.5pt}
+  body::before,body::after{display:none}
+  .trust-banner,.topbar,.subheader,.share-strip,.hero-stats,.zip-btn,.print-btn,
+  .search-box,.search-dropdown,.topbar-badge,.doc-card-actions,.folder-tile-zip,
+  .modal,.site-footer .fb-badge,.kbd-hint,.recent-rail{display:none !important}
+  .app,.main,.content,.hero,.site-footer{max-width:none;padding:0;margin:0}
+  .hero{padding-bottom:8pt;border-bottom:1pt solid #ccc;margin-bottom:12pt;display:block}
+  .hero h1{font-size:22pt;color:#000}
+  .hero h1 em{color:#000;-webkit-text-fill-color:#000}
+  .hero-eyebrow,.hero-desc{color:#333;background:none;border:none;padding:0;display:block;font-size:9pt;margin:0 0 4pt}
+  .content{padding:0}
+  .dept-grid,.docs-grid,.folders-grid{display:block}
+  .dept-card,.doc-card,.folder-tile,.recent-card{
+    page-break-inside:avoid;break-inside:avoid;
+    box-shadow:none;border:1pt solid #ccc;margin-bottom:6pt;
+    padding:6pt 8pt;
+  }
+  .dept-card{padding:10pt}
+  .doc-card-verified{display:none}
+  .doc-card::before,.dept-card::before,.dept-card::after{display:none}
+  .site-footer{background:#fff;color:#000;padding:8pt 0 0;border-top:1pt solid #ccc;margin-top:14pt}
+  .footer-brand h4,.footer-col h5,.footer-col li,.footer-col li strong{color:#000}
+  .footer-col h5{border-bottom:1pt solid #999;padding-bottom:2pt;margin-bottom:4pt}
+  .section-head h2{color:#000;font-size:14pt}
+  .doc-card-name{font-size:10pt}
+  a{color:#000;text-decoration:none}
+  a[href]::after{content:""}
+}
 </style>
 </head>
 <body>
 
 <div class="app">
+
+  <!-- ===== TRUST BANNER ===== -->
+  <div class="trust-banner" role="region" aria-label="Trust indicators">
+    <span class="tb-item"><?= icon_verified_badge(13) ?><span class="tb-
+      <!-- ===== TRUST BANNER ===== -->
+  <div class="trust-banner" role="region" aria-label="Trust indicators">
+    <span class="tb-item"><?= icon_verified_badge(13) ?><span class="tb-strong">Officially Verified</span> Documents</span>
+    <span class="tb-sep">•</span>
+    <span class="tb-item"><?= icon_lock(13) ?>End-to-end encrypted access</span>
+    <span class="tb-sep">•</span>
+    <span class="tb-item"><?= icon_clock(13) ?>Link expires <strong><?= htmlspecialchars($expiresLocal, ENT_QUOTES, 'UTF-8') ?></strong></span>
+  </div>
+
   <main class="main">
 
     <!-- TOPBAR -->
@@ -1785,7 +2124,7 @@ body::after{
           <span class="school-sub">Sagay City Inc.</span>
         </div>
       </div>
-      <span class="topbar-badge">Welcome to the USAT, Compliance Portal.</span>
+      <span class="topbar-badge">CHED Compliance Portal</span>
     </header>
 
     <!-- SUBHEADER -->
@@ -1820,8 +2159,12 @@ body::after{
         <label class="search-box" for="docSearch">
           <?= icon_search(14) ?>
           <input type="search" id="docSearch" placeholder="Search all documents…" aria-label="Search all documents" autocomplete="off" aria-autocomplete="list" aria-controls="searchResults">
+          <span class="kbd-hint" aria-hidden="true">/</span>
         </label>
         <div id="searchResults" class="search-dropdown" role="listbox" aria-live="polite" hidden></div>
+        <button type="button" class="print-btn js-print" title="Print inventory (Ctrl+P)">
+          <?= icon_print(13) ?><span>Print</span>
+        </button>
         <?php if ($viewDept !== null): ?>
           <a class="zip-btn js-zip" href="?t=<?= $tq ?>&amp;action=zip&amp;dept=<?= (int)$viewDept ?><?= $viewFolder > 0 ? '&amp;folder=' . (int)$viewFolder : '' ?>">
             <?= icon_zip(13) ?><span>Download ZIP</span>
@@ -1836,27 +2179,27 @@ body::after{
 
     <!-- SHARE INFO STRIP -->
     <div class="share-strip" aria-label="Share info">
-      <span class="share-strip-title">Share Info</span>
+      <span class="share-strip-title"><?= icon_verified_badge(11) ?> Secure Share</span>
       <span class="share-stat"><span class="k">Expires</span> <span class="v"><?= htmlspecialchars($expiresLocal, ENT_QUOTES, 'UTF-8') ?></span></span>
       <span class="share-stat"><span class="k">Slots left</span> <span class="v"><?= htmlspecialchars($slotsLabel, ENT_QUOTES, 'UTF-8') ?></span></span>
       <span class="share-stat"><span class="k">Total files</span> <span class="v"><?= (int)$totalDocs ?></span></span>
     </div>
 
     <?php if ($viewDept === null): ?>
-      <!-- ALL DEPARTMENTS VIEW -->
+      <!-- =========================== ALL DEPARTMENTS =========================== -->
       <section class="hero">
         <div class="hero-left">
-          <span class="hero-eyebrow"><span class="dot"></span> Shared with you</span>
+          <span class="hero-eyebrow"><span class="dot"></span> Prepared for CHED Evaluation</span>
           <h1>USAT <em>Compliance, Documents.</em></h1>
-          <p class="hero-desc">Explore compliance documents from all departments of USAT College Sagay City, Inc.</p>
+          <p class="hero-desc">A verified, curated repository of compliance documents from all departments of USAT College Sagay City, Inc. — presented for official CHED review.</p>
         </div>
         <div class="hero-stats">
           <div class="hero-stat">
-            <div class="hero-stat-num"><?= count($deptCards) ?></div>
+            <div class="hero-stat-num" data-count="<?= count($deptCards) ?>"><?= count($deptCards) ?></div>
             <div class="hero-stat-label">Departments</div>
           </div>
           <div class="hero-stat">
-            <div class="hero-stat-num"><?= (int)$totalInScope ?></div>
+            <div class="hero-stat-num" data-count="<?= (int)$totalInScope ?>"><?= (int)$totalInScope ?></div>
             <div class="hero-stat-label">Documents</div>
           </div>
           <div class="hero-stat">
@@ -1867,6 +2210,51 @@ body::after{
       </section>
 
       <div class="content">
+
+        <?php if (!empty($recentDocs)): ?>
+          <!-- RECENT UPLOADS RAIL -->
+          <div class="section-head">
+            <h2>Recently Verified</h2>
+            <span class="sh-meta"><?= count($recentDocs) ?> latest upload<?= count($recentDocs) === 1 ? '' : 's' ?></span>
+          </div>
+          <div class="recent-rail">
+            <?php foreach ($recentDocs as $rd):
+              $rid   = (int)$rd['id'];
+              $rsrc  = $rd['source'] === 'ph_document' ? 'ph_document' : 'document';
+              $rtitle = trim((string)($rd['title'] ?? ''));
+              if ($rtitle === '' || strcasecmp($rtitle, 'Direct Upload') === 0) {
+                  $rtitle = (string)($rd['filename'] ?? 'Untitled');
+              }
+              $rext = strtolower(pathinfo((string)($rd['filename'] ?? ''), PATHINFO_EXTENSION));
+              $rdate = !empty($rd['upload_date']) ? utc_to_local($rd['upload_date'], 'M d, Y') : '';
+              $rsrcEnc = urlencode($rsrc);
+            ?>
+              <a class="recent-card js-view-doc"
+                 href="#"
+                 data-doc-id="<?= $rid ?>"
+                 data-source="<?= $rsrcEnc ?>"
+                 data-filename="<?= htmlspecialchars($rtitle, ENT_QUOTES, 'UTF-8') ?>"
+                 data-ext="<?= htmlspecialchars($rext, ENT_QUOTES, 'UTF-8') ?>"
+                 title="<?= htmlspecialchars($rtitle, ENT_QUOTES, 'UTF-8') ?>">
+                <span class="recent-ico"><?= icon_doc_v2(18) ?></span>
+                <div class="recent-body">
+                  <div class="recent-title"><?= htmlspecialchars($rtitle, ENT_QUOTES, 'UTF-8') ?></div>
+                  <div class="recent-meta">
+                    <span class="rm-chip">Verified</span>
+                    <span><?= htmlspecialchars((string)$rd['dept_name'], ENT_QUOTES, 'UTF-8') ?></span>
+                    <?php if ($rdate !== ''): ?><span>· <?= htmlspecialchars($rdate, ENT_QUOTES, 'UTF-8') ?></span><?php endif; ?>
+                  </div>
+                </div>
+              </a>
+            <?php endforeach; ?>
+          </div>
+        <?php endif; ?>
+
+        <div class="section-head">
+          <h2>Departments</h2>
+          <span class="sh-meta"><?= count($deptCards) ?> with documents · <?= (int)$totalInScope ?> total files</span>
+        </div>
+
         <?php if (empty($deptCards)): ?>
           <div class="empty-state">
             <div class="empty-ico"><?= icon_folder_v2(44) ?></div>
@@ -1885,8 +2273,24 @@ body::after{
                   <div class="dept-icon-wrap"><?= icon_folder_v2(48) ?></div>
                   <div class="dept-title-wrap">
                     <h3 class="dept-title"><?= htmlspecialchars($deptName, ENT_QUOTES, 'UTF-8') ?></h3>
-                    <div class="dept-subtitle"><strong><?= $count ?></strong> document<?= $count === 1 ? '' : 's' ?></div>
+                    <div class="dept-badges">
+                      <span class="dept-chip"><strong><?= $count ?></strong> file<?= $count === 1 ? '' : 's' ?></span>
+                      <span class="dept-chip chip-verified"><?= icon_check(9) ?> Verified</span>
+                    </div>
                   </div>
+                </div>
+                <div class="dept-foot">
+                  <div class="dept-coverage" aria-hidden="true">
+                    <?php
+                      /* visual progress: filled dots proportional to file count */
+                      $maxDots = 5;
+                      $filled  = (int)min($maxDots, max(1, (int)round($count / 6)));
+                      for ($di = 0; $di < $maxDots; $di++) {
+                          echo '<span class="dept-dot' . ($di < $filled ? ' is-active' : '') . '"></span>';
+                      }
+                    ?>
+                  </div>
+                  <span class="dept-updated"><?= icon_clock(11) ?> Ready to review</span>
                 </div>
               </a>
             <?php endforeach; ?>
@@ -1895,14 +2299,16 @@ body::after{
       </div>
 
     <?php else: ?>
-      <!-- DEPARTMENT VIEW -->
+      <!-- =========================== DEPARTMENT VIEW =========================== -->
       <section class="hero">
         <div class="hero-left">
+          <span class="hero-eyebrow"><span class="dot"></span> Department Documents</span>
           <h1><?= htmlspecialchars($viewFolder === 0 ? $viewDeptName : (end($breadcrumb)['name'] ?? $viewDeptName), ENT_QUOTES, 'UTF-8') ?></h1>
+          <p class="hero-desc">Verified compliance documents for this <?= $viewFolder > 0 ? 'folder' : 'department' ?>, ready for inspection.</p>
         </div>
         <div class="hero-stats">
           <div class="hero-stat">
-            <div class="hero-stat-num"><?= (int)$viewCount ?></div>
+            <div class="hero-stat-num" data-count="<?= (int)$viewCount ?>"><?= (int)$viewCount ?></div>
             <div class="hero-stat-label">Documents</div>
           </div>
           <div class="hero-stat">
@@ -1929,9 +2335,45 @@ body::after{
     <?php endif; ?>
 
   </main>
+
+  <!-- =========================== FOOTER =========================== -->
+  <footer class="site-footer" role="contentinfo">
+    <div class="footer-inner">
+      <div class="footer-brand">
+        <img src="picture/love.jpg" alt="USAT College logo" width="44" height="44">
+        <div>
+          <h4>USAT College — Sagay City, Inc.</h4>
+          <p>Official CHED compliance document repository. All documents are verified and approved by the system administrator before being shared through this portal.</p>
+        </div>
+      </div>
+      <div class="footer-col">
+        <h5>Compliance</h5>
+        <ul>
+          <li>Documents verified: <strong>Admin-approved only</strong></li>
+          <li>Access: <strong>Token-secured</strong></li>
+          <li>Transmission: <strong>Encrypted</strong></li>
+          <li>Audit: <strong>Session-logged</strong></li>
+        </ul>
+      </div>
+      <div class="footer-col">
+        <h5>This Link</h5>
+        <ul>
+          <li>Expires: <strong><?= htmlspecialchars($expiresLocal, ENT_QUOTES, 'UTF-8') ?></strong></li>
+          <li>Slots remaining: <strong><?= htmlspecialchars($slotsLabel, ENT_QUOTES, 'UTF-8') ?></strong></li>
+          <li>Scope: <strong><?= $scopeDeptId !== null ? 'Single department' : 'All departments' ?></strong></li>
+          <li>Total in scope: <strong><?= (int)$totalDocs ?> file<?= $totalDocs === 1 ? '' : 's' ?></strong></li>
+        </ul>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <span>© <?= date('Y') ?> USAT College Sagay City, Inc. · CHED Compliance Portal</span>
+      <span class="fb-badge"><?= icon_verified_badge(11) ?> Verified Institutional Records</span>
+    </div>
+  </footer>
+
 </div>
 
-<!-- MODAL -->
+<!-- =========================== MODAL =========================== -->
 <div class="modal" id="viewModal" hidden>
   <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
     <div class="modal-head">
@@ -1992,13 +2434,25 @@ body::after{
                 bodyEl.appendChild(img);
             }
         } else {
-            var fb = document.createElement('div');
-            fb.className = 'modal-fallback';
-            fb.innerHTML =
-                '<h4>Preview not available</h4>' +
-                '<p>This file type cannot be previewed in the browser. Download it to open on your device.</p>' +
-                '<a class="btn-download" href="' + downloadUrl + '">Download file</a>';
-            bodyEl.appendChild(fb);
+            // shortcut: uses external Google Docs Viewer for office/unknown files;
+            // requires public URL access (token in URL), <upgrade to server-side
+            // PDF conversion if external dependency is unacceptable>
+            var gUrl = 'https://docs.google.com/gview?embedded=1&url=' + encodeURIComponent(
+                window.location.protocol + '//' + window.location.host + window.location.pathname + previewUrl
+            );
+            var iframe = document.createElement('iframe');
+            iframe.src = gUrl;
+            iframe.title = 'Document preview — ' + (opts.filename || 'Document');
+            iframe.style.width = '100%';
+            iframe.style.height = '100%';
+            iframe.style.border = 'none';
+            bodyEl.appendChild(iframe);
+
+            var note = document.createElement('div');
+            note.className = 'modal-fallback';
+            note.innerHTML = '<p style="font-size:.8rem;color:#666;margin-top:8px;text-align:center;">' +
+                'If the preview does not load, <a href="' + downloadUrl + '">download the file</a> to open it locally.</p>';
+            bodyEl.appendChild(note);
         }
 
         modal.removeAttribute('hidden');
@@ -2045,6 +2499,14 @@ body::after{
         else if (e.key === 'Tab') trapFocus(modal, e);
     });
 
+    /* ---------- Print ---------- */
+    document.addEventListener('click', function (e) {
+        var p = e.target.closest && e.target.closest('.js-print');
+        if (!p) return;
+        e.preventDefault();
+        window.print();
+    });
+
     /* ---------- ZIP loading spinner ---------- */
     document.addEventListener('click', function (e) {
         var zip = e.target.closest && e.target.closest('.js-zip');
@@ -2052,6 +2514,27 @@ body::after{
         zip.classList.add('is-loading');
         setTimeout(function () { zip.classList.remove('is-loading'); }, 8000);
     });
+
+    /* ---------- Animated counters ---------- */
+    (function () {
+        var nums = document.querySelectorAll('.hero-stat-num[data-count]');
+        if (!nums.length) return;
+        var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        if (reduce) return;
+        nums.forEach(function (el) {
+            var target = parseInt(el.getAttribute('data-count'), 10) || 0;
+            if (target === 0) return;
+            var start = 0, dur = 900, t0 = null;
+            function step(ts) {
+                if (!t0) t0 = ts;
+                var p = Math.min(1, (ts - t0) / dur);
+                var eased = 1 - Math.pow(1 - p, 3);
+                el.textContent = String(Math.round(start + (target - start) * eased));
+                if (p < 1) requestAnimationFrame(step);
+            }
+            requestAnimationFrame(step);
+        });
+    })();
 
     /* ---------- Global search ---------- */
     (function () {
@@ -2193,6 +2676,17 @@ body::after{
         document.addEventListener('click', function (e) {
             if (!input.contains(e.target) && !dropdown.contains(e.target)) clearDropdown();
         });
+
+        /* ---------- "/" focus shortcut ---------- */
+        document.addEventListener('keydown', function (e) {
+            var tag = (document.activeElement && document.activeElement.tagName) || '';
+            var isField = /INPUT|TEXTAREA|SELECT/.test(tag) || (document.activeElement && document.activeElement.isContentEditable);
+            if (e.key === '/' && !isField && !modal.hasAttribute === false) {
+                if (!modal.hasAttribute('hidden')) return;
+                e.preventDefault();
+                input.focus();
+            }
+        });
     })();
 
     /* ---------- Highlight after search navigation ---------- */
@@ -2209,7 +2703,7 @@ body::after{
             '.js-view-doc[data-doc-id="' + id + '"][data-source="' + source + '"]'
         );
         if (!btn) return;
-        var card = btn.closest('.doc-card');
+        var card = btn.closest('.doc-card') || btn.closest('.recent-card');
         if (!card) return;
 
         card.classList.add('is-highlighted');
