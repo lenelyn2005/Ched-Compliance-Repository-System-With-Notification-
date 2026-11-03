@@ -228,9 +228,7 @@ $hasAvatar     = !empty($headerAvatarUrl);
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <!-- shortcut: standalone pages (login, share portal, preview) must include these two lines too -->
-    <link rel="icon" type="image/png" href="favicon.png" sizes="32x32">
-    <link rel="shortcut icon" href="favicon.ico">
+    <?php include __DIR__ . '/favicon.php'; ?>
     <meta name="csrf-token" content="<?= htmlspecialchars(getCsrfToken(), ENT_QUOTES, 'UTF-8') ?>">
     <?php if (isset($_SESSION['user_id'])): ?>
     <meta name="ws-ticket" content="<?= htmlspecialchars(generateWsTicket((int)$_SESSION['user_id']), ENT_QUOTES, 'UTF-8') ?>">

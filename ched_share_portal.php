@@ -19,10 +19,11 @@ function deny_share(int $httpCode, string $message, string $title = 'Access Deni
 {
     http_response_code($httpCode);
     header('Content-Type: text/html; charset=utf-8');
+    $faviconTags = file_get_contents(__DIR__ . '/includes/favicon.php');
     $safe      = htmlspecialchars($message, ENT_QUOTES, 'UTF-8');
     $titleSafe = htmlspecialchars($title, ENT_QUOTES, 'UTF-8');
     echo <<<HTML
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{$titleSafe}</title>
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">{$faviconTags}<title>{$titleSafe}</title>
 <meta name="robots" content="noindex,nofollow">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -1201,6 +1202,7 @@ $totalDocs = $viewDept === null ? $totalInScope : $viewCount;
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex,nofollow">
 <meta name="description" content="Official CHED compliance document repository for USAT College Sagay City, Inc.">
+<?php include __DIR__ . '/includes/favicon.php'; ?>
 <title><?= $viewDept === null ? 'CHED Compliance Portal · USAT College' : htmlspecialchars($viewDeptName, ENT_QUOTES, 'UTF-8') . ' · CHED Portal' ?></title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>

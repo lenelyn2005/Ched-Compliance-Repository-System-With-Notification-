@@ -52,7 +52,7 @@ function buildRecipientEmailBody(array $user, string $title, string $message): s
     $msg = htmlspecialchars($message);
     return '<!DOCTYPE html>
 <html lang="en">
-<head><meta charset="utf-8"></head>
+<head><meta charset="utf-8"><link rel="icon" type="image/png" href="favicon.png" sizes="32x32"><link rel="icon" type="image/x-icon" href="favicon.ico"></head>
 <body style="margin:0;padding:0;background:#f4f6f8;font-family:Arial,Helvetica,sans-serif;">
 <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6f8;padding:24px 0;">
 <tr><td align="center">

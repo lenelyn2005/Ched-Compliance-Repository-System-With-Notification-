@@ -10,6 +10,8 @@ use PhpOffice\PhpSpreadsheet\IOFactory as SpreadsheetFactory;
 use PhpOffice\PhpPresentation\IOFactory as PresentationFactory;
 use PhpOffice\PhpPresentation\Writer\PDF\DomPDF as PresentationPdfWriter;
 
+$previewFaviconTags = file_get_contents(__DIR__ . '/includes/favicon.php');
+
 // Authorization check - user must be logged in
 if (!isset($_SESSION['user_id']) || !isset($_SESSION['role'])) {
     http_response_code(403);
@@ -412,7 +414,7 @@ if (in_array($ext, ['doc', 'docx', 'docs'])) {
         header('Content-Type: text/html; charset=utf-8');
         echo '<!DOCTYPE html>
             <html>
-            <head>
+            <head>{$previewFaviconTags}
                 <meta charset="UTF-8">
                 <title>Preview Unavailable</title>
                 <style>
@@ -444,7 +446,7 @@ if (in_array($ext, ['doc', 'docx', 'docs'])) {
     }
 
     // Minimal loading indicator while conversion prepares.
-    echo '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Loading preview...</title><style>body{font-family:sans-serif;text-align:center;padding:60px;background:#f5f5f5;color:#555;}h2{color:#2563eb;}</style></head><body><h2>Preparing preview...</h2><p>Please wait while the document is being converted.</p></body></html>';
+    echo "<!DOCTYPE html><html><head>{$previewFaviconTags}<meta charset=\"UTF-8\"><title>Loading preview...</title><style>body{font-family:sans-serif;text-align:center;padding:60px;background:#f5f5f5;color:#555;}h2{color:#2563eb;}</style></head><body><h2>Preparing preview...</h2><p>Please wait while the document is being converted.</p></body></html>";
     flush();
 
     // PhpOffice only reads local files: stage a temp copy of the object and
@@ -468,7 +470,7 @@ if (in_array($ext, ['doc', 'docx', 'docs'])) {
         // Wrap in responsive HTML document
         $finalHtml = '<!DOCTYPE html>
             <html>
-            <head>
+            <head>{$previewFaviconTags}
                 <meta charset="UTF-8">
                 <meta name="viewport" content="width=device-width, initial-scale=1.0">
                 <title>' . htmlspecialchars($file['filename']) . '</title>
@@ -525,7 +527,7 @@ if (in_array($ext, ['doc', 'docx', 'docs'])) {
         $downloadUrl = 'download_document.php?id=' . (int)$id . '&source=' . htmlspecialchars($source);
         echo '<!DOCTYPE html>
             <html>
-            <head>
+            <head>{$previewFaviconTags}
                 <meta charset="UTF-8">
                 <title>Preview Error</title>
                 <style>
@@ -559,7 +561,7 @@ if (in_array($ext, ['xls', 'xlsx'])) {
         header('Content-Type: text/html; charset=utf-8');
         echo '<!DOCTYPE html>
             <html>
-            <head>
+            <head>{$previewFaviconTags}
                 <meta charset="UTF-8">
                 <title>Preview Unavailable</title>
                 <style>
@@ -591,7 +593,7 @@ if (in_array($ext, ['xls', 'xlsx'])) {
     }
 
     // Minimal loading indicator while conversion prepares.
-    echo '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Loading preview...</title><style>body{font-family:sans-serif;text-align:center;padding:60px;background:#f5f5f5;color:#555;}h2{color:#2563eb;}</style></head><body><h2>Preparing preview...</h2><p>Please wait while the document is being converted.</p></body></html>';
+    echo "<!DOCTYPE html><html><head>{$previewFaviconTags}<meta charset=\"UTF-8\"><title>Loading preview...</title><style>body{font-family:sans-serif;text-align:center;padding:60px;background:#f5f5f5;color:#555;}h2{color:#2563eb;}</style></head><body><h2>Preparing preview...</h2><p>Please wait while the document is being converted.</p></body></html>";
     flush();
 
     // PhpOffice only reads local files: stage a temp copy of the object and
@@ -615,7 +617,7 @@ if (in_array($ext, ['xls', 'xlsx'])) {
         // Wrap with responsive CSS
         $finalHtml = '<!DOCTYPE html>
             <html>
-            <head>
+            <head>{$previewFaviconTags}
                 <meta charset="UTF-8">
                 <meta name="viewport" content="width=device-width, initial-scale=1.0">
                 <title>' . htmlspecialchars($file['filename']) . '</title>
@@ -665,7 +667,7 @@ if (in_array($ext, ['xls', 'xlsx'])) {
         $downloadUrl = 'download_document.php?id=' . (int)$id . '&source=' . htmlspecialchars($source);
         echo '<!DOCTYPE html>
             <html>
-            <head>
+            <head>{$previewFaviconTags}
                 <meta charset="UTF-8">
                 <title>Preview Error</title>
                 <style>
@@ -698,7 +700,7 @@ if (in_array($ext, ['ppt', 'pptx'])) {
         header('Content-Type: text/html; charset=utf-8');
         echo '<!DOCTYPE html>
             <html>
-            <head>
+            <head>{$previewFaviconTags}
                 <meta charset="UTF-8">
                 <title>Preview Unavailable</title>
                 <style>
@@ -737,7 +739,7 @@ if (in_array($ext, ['ppt', 'pptx'])) {
     }
 
     // Minimal loading indicator while conversion prepares.
-    echo '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Loading preview...</title><style>body{font-family:sans-serif;text-align:center;padding:60px;background:#f5f5f5;color:#555;}h2{color:#2563eb;}</style></head><body><h2>Preparing preview...</h2><p>Please wait while the document is being converted.</p></body></html>';
+    echo "<!DOCTYPE html><html><head>{$previewFaviconTags}<meta charset=\"UTF-8\"><title>Loading preview...</title><style>body{font-family:sans-serif;text-align:center;padding:60px;background:#f5f5f5;color:#555;}h2{color:#2563eb;}</style></head><body><h2>Preparing preview...</h2><p>Please wait while the document is being converted.</p></body></html>";
     flush();
 
     // PhpOffice only reads local files: stage a temp copy of the object and
@@ -772,7 +774,7 @@ if (in_array($ext, ['ppt', 'pptx'])) {
         $downloadUrl = 'download_document.php?id=' . (int)$id . '&source=' . htmlspecialchars($source);
         echo '<!DOCTYPE html>
             <html>
-            <head>
+            <head>{$previewFaviconTags}
                 <meta charset="UTF-8">
                 <title>Preview Error</title>
                 <style>
@@ -804,7 +806,7 @@ http_response_code(415);
 $downloadUrl = 'download_document.php?id=' . (int)$id . '&source=' . htmlspecialchars($source);
 echo '<!DOCTYPE html>
 <html>
-<head>
+<head>{$previewFaviconTags}
     <meta charset="UTF-8">
     <title>Unsupported Format</title>
     <style>

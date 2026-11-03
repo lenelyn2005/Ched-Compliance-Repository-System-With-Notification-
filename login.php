@@ -467,6 +467,7 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
 <!DOCTYPE html>
 <html lang="en">
 <head>
+    <?php include 'includes/favicon.php'; ?>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="description" content="USAT College Sagay City Inc. — Compliance & Document Management System. Secure portal for CHED compliance submissions, accreditation documents, and institutional reporting.">
@@ -2280,7 +2281,7 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
             <p class="hero-sub">
                 One secure portal for CHED compliance submissions, accreditation
                 documents, and institutional reporting — purpose-built for the
-                administrators, program heads, and faculty of USAT College Sagay City Inc.
+                administrators, program heads, unit heads, staff and faculty of USAT College Sagay City Inc.
             </p>
 
             <div class="hero-actions">
@@ -2490,7 +2491,7 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
             <article class="feature-card reveal">
                 <div class="feature-icon"><i class="fas fa-users-gear"></i></div>
                 <h3>Role-based access</h3>
-                <p>Administrators, program heads, and faculty each see only what their role requires — enforced server-side on every request.</p>
+                <p>Administrators, program heads, unit heads, staff and faculty each see only what their role requires — enforced server-side on every request.</p>
             </article>
 
             <article class="feature-card reveal">
