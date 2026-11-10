@@ -16,7 +16,7 @@
      * @param {Function} fetchFn  Async function that fetches and updates DOM
      * @param {number} intervalMs Polling interval in ms (default 30000)
      */
-    function register(id, fetchFn, intervalMs = 30000) {
+    function register(id, fetchFn, intervalMs = 60000) {
         unregister(id);
         tasks[id] = { fetchFn, intervalMs, timer: null };
         if (!paused) startTask(id);

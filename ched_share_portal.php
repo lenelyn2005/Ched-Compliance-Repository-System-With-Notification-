@@ -1843,7 +1843,7 @@ body::after{
     <!-- TOPBAR -->
     <header class="topbar">
       <div class="topbar-brand">
-        <img class="topbar-brand-img" src="picture/love.jpg" alt="USAT College logo" width="44" height="44">
+        <img class="topbar-brand-img" src="picture/love.webp" alt="USAT College logo" width="44" height="44">
         <div class="topbar-brand-text">
           <h2>USAT College</h2>
           <span class="school-sub">Sagay City Inc.</span>
@@ -2003,7 +2003,7 @@ body::after{
   <footer class="site-footer" role="contentinfo">
     <div class="footer-inner">
       <div class="footer-brand">
-        <img src="picture/love.jpg" alt="USAT College logo" width="44" height="44">
+        <img src="picture/love.webp" alt="USAT College logo" width="44" height="44">
         <div>
           <h4>USAT College — Sagay City, Inc.</h4>
           <p>Official CHED compliance document repository. All documents are verified and approved by the system administrator before being shared through this portal.</p>

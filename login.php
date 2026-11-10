@@ -93,9 +93,6 @@ function checkDeviceLockout(PDO $pdo, string $deviceId): int {
         return max(0, (int)$until - time());
     }
 
-    $pdo->prepare('DELETE FROM device_lockouts WHERE device_id = ? AND locked_until <= ?')
-        ->execute([$deviceId, time()]);
-
     return 0;
 }
 
@@ -277,8 +274,9 @@ function attemptLogin(PDO $pdo, string $email, string $password, string $ip, str
 // 4. STATE
 // ============================================================
 
-$ip         = getClientIP();
-$device_id  = getDeviceId();
+$ip           = getClientIP();
+$device_known = !empty($_COOKIE['chd_device_id']); // a freshly generated id cannot be locked out
+$device_id    = getDeviceId();
 $user_agent = $_SERVER['HTTP_USER_AGENT'] ?? '';
 $email      = is_string($_POST['email'] ?? null) ? trim($_POST['email']) : '';
 if (strlen($email) > 254) { $email = ''; }
@@ -312,7 +310,7 @@ if (!isset($_SESSION['csrf_token'])) {
 $csrf_token = $_SESSION['csrf_token'];
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-    $devicePreLock = checkDeviceLockout($pdo, $device_id);
+    $devicePreLock = $device_known ? checkDeviceLockout($pdo, $device_id) : 0;
     if ($devicePreLock > 0) {
         $lock_remaining = $devicePreLock;
         $lock_total     = DEVICE_LOCKOUT_WINDOW;
@@ -346,7 +344,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             unset($_SESSION['locked_email']);
         }
 
-        $deviceLockRemaining = checkDeviceLockout($pdo, $device_id);
+        $deviceLockRemaining = $device_known ? checkDeviceLockout($pdo, $device_id) : 0;
 
         if ($deviceLockRemaining > 0) {
             $lock_remaining = $deviceLockRemaining;
@@ -677,7 +675,7 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
             content: '';
             position: absolute;
             inset: 0;
-            background: url('picture/ched.png') center / cover no-repeat;
+            background: url('picture/ched.webp') center / cover no-repeat;
             /* Removed blur, opacity, and filter to make image clear */
             opacity: 1;
             pointer-events: none;
@@ -1266,6 +1264,44 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
             cursor: not-allowed;
             transform: none;
             box-shadow: none;
+        }
+
+        /* ============================================================
+           Sign In button — loading state
+           ============================================================ */
+        .btn-submit .btn-spinner {
+            display: inline-block;
+            width: 15px;
+            height: 15px;
+            border: 2px solid rgba(255, 255, 255, .35);
+            border-top-color: #fff;
+            border-radius: 50%;
+            animation: btnSpin .65s linear infinite;
+            flex-shrink: 0;
+            margin-right: 9px;
+        }
+
+        @keyframes btnSpin {
+            to { transform: rotate(360deg); }
+        }
+
+        .btn-submit.is-loading {
+            cursor: wait;
+            opacity: .85;
+            pointer-events: none;
+        }
+
+        .btn-submit.is-loading:hover {
+            transform: none;
+            box-shadow: 0 8px 20px -8px rgba(91, 78, 255, .85);
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            .btn-submit .btn-spinner {
+                animation: none;
+                border-top-color: #fff;
+                border-right-color: #fff;
+            }
         }
 
         .login-card-foot {
@@ -2419,7 +2455,7 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
 <nav class="navbar" id="navbar">
     <div class="container nav-inner">
         <a href="#top" class="nav-brand">
-            <img src="picture/love.jpg" alt="USAT College Sagay City Inc. logo">
+            <img src="picture/love.webp" alt="USAT College Sagay City Inc. logo">
             <span class="brand-text">
                 <strong>USAT College Sagay City Inc.</strong>
                 <small>Compliance Portal</small>
@@ -2506,7 +2542,7 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
         <!-- LEFT: Visual / Brand panel -->
         <div class="login-card-visual">
             <div class="login-visual-brand">
-                <img src="picture/love.jpg" alt="USAT College Sagay City Inc. logo">
+                <img src="picture/love.webp" alt="USAT College Sagay City Inc. logo">
                 <div class="brand-text">
                     <strong>USAT College</strong>
                     <small>Sagay City Inc.</small>
@@ -2709,7 +2745,7 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
 
         <div class="about-modal-footer">
             <div class="about-modal-meta">
-                <img src="picture/love.jpg" alt="USAT College Sagay City Inc. logo">
+                <img src="picture/love.webp" alt="USAT College Sagay City Inc. logo">
                 <div>
                     <strong>USAT College Sagay City Inc.</strong>
                     <small>Sagay City, Negros Occidental</small>
@@ -2893,7 +2929,7 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
             <!-- Brand -->
             <div class="footer-brand">
                 <div class="footer-logo">
-                    <img src="picture/love.jpg" alt="USAT College Sagay City Inc. logo">
+                    <img src="picture/love.webp" alt="USAT College Sagay City Inc. logo">
                     <div>
                         <strong>USAT College<br>Sagay City Inc.</strong>
                         <small>Compliance Portal</small>
@@ -3252,6 +3288,54 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
         items.forEach(function (el, i) {
             el.style.transitionDelay = (Math.min(i, 6) * 60) + 'ms';
             observer.observe(el);
+        });
+    })();
+
+    /* ============================================================
+       Sign In button loading indicator
+       ============================================================ */
+    (function () {
+        const form      = document.getElementById('loginForm');
+        const submitBtn = document.getElementById('submitBtn');
+        if (!form || !submitBtn) return;
+
+        let isSubmitting = false;
+
+        form.addEventListener('submit', function (e) {
+            // Prevent duplicate submissions
+            if (isSubmitting) {
+                e.preventDefault();
+                return;
+            }
+
+            // Let the browser perform native validation FIRST.
+            // If validation fails, the submit event never fires on modern browsers,
+            // but we guard defensively here as well.
+            if (typeof form.checkValidity === 'function' && !form.checkValidity()) {
+                return;
+            }
+
+            isSubmitting = true;
+
+            // Switch button into loading state
+            submitBtn.disabled = true;
+            submitBtn.classList.add('is-loading');
+            submitBtn.setAttribute('aria-busy', 'true');
+            submitBtn.innerHTML =
+                '<span class="btn-spinner" aria-hidden="true"></span>' +
+                '<span>Signing in...</span>';
+        });
+
+        // Safety net: if the page is restored from the bfcache (user clicked Back
+        // after a failed login), reset the button so it is usable again.
+        window.addEventListener('pageshow', function (e) {
+            if (e.persisted) {
+                isSubmitting = false;
+                submitBtn.disabled = false;
+                submitBtn.classList.remove('is-loading');
+                submitBtn.removeAttribute('aria-busy');
+                submitBtn.innerHTML = '<i class="fas fa-sign-in-alt"></i> Sign In';
+            }
         });
     })();
 </script>

@@ -294,7 +294,7 @@ if ($avatarInitial === '') {
 <aside class="sidebar" id="mainSidebar">
     <div class="sidebar-header">
         <div class="sidebar-brand">
-            <img src="picture/love.jpg" alt="CHED Logo" class="sidebar-logo">
+            <img src="picture/love.webp" alt="CHED Logo" class="sidebar-logo">
             <div class="sidebar-brand-text">
                 <h2>CHED Compliance</h2>
                 <small>Document Repository</small>

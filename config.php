@@ -275,30 +275,30 @@ if (!$pdo) {
     die($errorMsg);
 }
 
-// Probe optional columns.
+// Probe optional columns (cached: otherwise these are two extra queries per request).
 $GLOBALS['active_session_cols'] = false;
 $GLOBALS['users_is_active_col'] = false;
 if (PHP_SAPI !== 'cli') {
-    try {
-        $pdo->query('SELECT active_session_token, active_session_last_seen FROM users WHERE id = 0');
-        $GLOBALS['active_session_cols'] = true;
-    } catch (Throwable $e) {
-        error_log('[CHED Compliance] users.active_session_* columns missing — restore schema from final.database.sql (single-session guard dormant).');
+    $schemaFlags = cache_get('schema_flags');
+    if (!is_array($schemaFlags)) {
+        $schemaFlags = ['active_session_cols' => false, 'users_is_active_col' => false];
+        try {
+            $pdo->query('SELECT active_session_token, active_session_last_seen FROM users WHERE id = 0');
+            $schemaFlags['active_session_cols'] = true;
+        } catch (Throwable $e) {
+            error_log('[CHED Compliance] users.active_session_* columns missing — restore schema from final.database.sql (single-session guard dormant).');
+        }
+        try {
+            $pdo->query('SELECT is_active FROM users WHERE id = 0');
+            $schemaFlags['users_is_active_col'] = true;
+        } catch (Throwable $e) {
+            error_log('[CHED Compliance] users.is_active column missing — apply migrations/super_admin.sql (account deactivation dormant).');
+        }
+        // ponytail: flags cached 1h; delete system/storage/cache after adding/removing these columns.
+        cache_set('schema_flags', $schemaFlags, 3600);
     }
-    try {
-        $pdo->query('SELECT is_active FROM users WHERE id = 0');
-        $GLOBALS['users_is_active_col'] = true;
-    } catch (Throwable $e) {
-        error_log('[CHED Compliance] users.is_active column missing — apply migrations/super_admin.sql (account deactivation dormant).');
-    }
-}
-
-try {
-    $tzOffset = (new DateTime('now', new DateTimeZone(date_default_timezone_get())))->format('P');
-    $quotedTz = $pdo->quote($tzOffset);
-    $pdo->exec("SET time_zone = " . $quotedTz);
-} catch (Throwable $e) {
-    error_log('[CHED Compliance] Failed to set MySQL session time_zone: ' . $e->getMessage());
+    $GLOBALS['active_session_cols'] = !empty($schemaFlags['active_session_cols']);
+    $GLOBALS['users_is_active_col'] = !empty($schemaFlags['users_is_active_col']);
 }
 
 // ===========================================================

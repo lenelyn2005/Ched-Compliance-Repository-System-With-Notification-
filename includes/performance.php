@@ -102,6 +102,8 @@ function perf_db(): ?PDO
     if (defined('DB_SQL_MODE') && DB_SQL_MODE !== '') {
         $initCommand .= ", SESSION sql_mode = '" . str_replace("'", '', DB_SQL_MODE) . "'";
     }
+    // Session time zone travels with the connection, saving a round-trip per request.
+    $initCommand .= ", time_zone = '" . date('P') . "'";
 
     $options = [
         PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,

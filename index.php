@@ -1,25 +1,5 @@
 <?php
-define('CHED_APP', true);
-require_once 'config.php';
-
-if (isset($_SESSION['role'])) {
-    switch ($_SESSION['role']) {
-        case 'admin':
-            header('Location: admin_dashboard.php');
-            break;
-        case 'super_admin':
-            header('Location: super_admin_dashboard.php');
-            break;
-        case 'department':
-        case 'unit_head':
-            header('Location: program_head_dashboard.php');
-            break;
-        case 'teacher':
-        case 'staff':
-            header('Location: teacher_dashboard.php');
-            break;
-    }
-    exit;
-}
+// Role routing lives in login.php (it already redirects signed-in users).
+// Keeping this file config-free avoids a second full boot on the first visit.
 header('Location: login.php');
 exit;

@@ -19,6 +19,17 @@
     Require all denied
 </FilesMatch>
 
+# Static images: let the browser (and Cloudflare) keep them. Logos are immutable;
+# uploaded avatars can be replaced under the same name, so they get only a day.
+<IfModule mod_headers.c>
+    <FilesMatch "\.(jpg|jpeg|png|webp|gif|ico|svg)$">
+        Header set Cache-Control "public, max-age=86400"
+    </FilesMatch>
+    <FilesMatch "^(love\.webp|ched\.webp|favicon\.(png|ico))$">
+        Header set Cache-Control "public, max-age=2592000"
+    </FilesMatch>
+</IfModule>
+
 <IfModule mod_rewrite.c>
     RewriteEngine On
     RewriteRule (^|/)\.git - [F,L]
