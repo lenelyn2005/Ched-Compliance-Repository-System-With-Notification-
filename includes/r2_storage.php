@@ -384,6 +384,28 @@ final class R2Storage
     }
 
     /**
+     * Stream a byte range of an object using the S3-compatible 'Range'
+     * parameter. Only the requested bytes are fetched — never the whole
+     * object. $length <= 0 means "from $offset to the end of the object".
+     * Key validation and error translation are identical to getStream().
+     */
+    public function getStreamRange(string $key, int $offset, int $length = 0): \Psr\Http\Message\StreamInterface
+    {
+        $key = self::objectKeyFor($key);
+        $range = 'bytes=' . $offset . '-' . ($length > 0 ? ($offset + $length - 1) : '');
+        try {
+            $r = $this->client()->getObject([
+                'Bucket' => $this->bucket(),
+                'Key'    => $key,
+                'Range'  => $range,
+            ]);
+            return $r['Body'];
+        } catch (\Throwable $e) {
+            throw self::toStorageError($e);
+        }
+    }
+
+    /**
      * Stage an object to a local temp file (previews/ZIPs, §7.2). The
      * destination is removed on any failure — never left as a partial file.
      */

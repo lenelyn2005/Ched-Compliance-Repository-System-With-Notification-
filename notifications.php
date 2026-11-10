@@ -719,6 +719,16 @@ include 'includes/header.php';
             updateRelativeTimes();
             setInterval(updateRelativeTimes, 10000);
 
+            // This form posts and reloads, so tell other tabs before leaving.
+            var markAllForm = document.querySelector('form button[name="mark_all_read"]');
+            if (markAllForm) {
+                markAllForm.form.addEventListener('submit', function () {
+                    if (window.CHED && CHED.WebSocketClient && CHED.WebSocketClient.setCount) {
+                        CHED.WebSocketClient.setCount(0);
+                    }
+                });
+            }
+
             let lastNotificationId = 0;
             const notificationsContainer = document.querySelector('.notif-history-item.flex');
 
@@ -747,6 +757,11 @@ include 'includes/header.php';
             }
 
             function updateNotificationBadge(count) {
+                // One painter for card, bell, tab and other tabs.
+                if (window.CHED && CHED.WebSocketClient && CHED.WebSocketClient.setCount) {
+                    CHED.WebSocketClient.setCount(count);
+                    return;
+                }
                 const badges = document.querySelectorAll('.card-header .badge');
                 badges.forEach(badge => {
                     if (badge.textContent.includes('unread')) {
@@ -855,12 +870,8 @@ include 'includes/header.php';
                                 statusBadge.textContent = 'Read';
                                 statusBadge.className = 'badge badge-pending text-xs status-badge';
                                 item.style.background = '';
-                                const headerBadge = document.querySelector('.card-header .badge');
-                                if (headerBadge && headerBadge.textContent.includes('unread')) {
-                                    const remaining = Math.max(0, (parseInt(headerBadge.textContent) || 1) - 1);
-                                    headerBadge.textContent = remaining + ' unread';
-                                    headerBadge.className = remaining > 0 ? 'badge badge-submitted' : 'badge badge-pending';
-                                }
+                                // Server-authoritative count: updates the card badge and the bell.
+                                updateNotificationBadge(data.unread_count || 0);
                             }
                         })
                         .catch(err => console.error('Mark read error:', err));

@@ -621,6 +621,7 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
             letter-spacing: .04em;
             text-transform: uppercase;
             color: #fff;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.5);
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
@@ -631,7 +632,8 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
             font-weight: 700;
             letter-spacing: .16em;
             text-transform: uppercase;
-            color: rgba(125, 211, 252, .85);
+            color: var(--accent-light);
+            text-shadow: 0 1px 3px rgba(0,0,0,0.5);
         }
 
         .nav-links {
@@ -640,41 +642,25 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
             gap: 6px;
         }
 
-        .nav-links a.nav-link {
+        .nav-links a.nav-link,
+        .nav-links button.nav-link {
             padding: 9px 14px;
             font-size: .82rem;
             font-weight: 600;
-            color: rgba(255, 255, 255, .74);
+            color: rgba(255, 255, 255, .9);
             border-radius: 999px;
             transition: var(--transition);
-        }
-
-        .nav-links a.nav-link:hover {
-            color: #fff;
-            background: rgba(255, 255, 255, .08);
-        }
-
-        .nav-cta {
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            padding: 10px 20px;
-            border-radius: 999px;
-            font-size: .82rem;
-            font-weight: 700;
-            color: #fff;
-            background: linear-gradient(135deg, var(--primary) 0%, var(--primary-dark) 100%);
-            box-shadow: 0 10px 24px -10px rgba(91, 78, 255, .9);
-            transition: var(--transition);
-            white-space: nowrap;
+            background: none;
             border: none;
             cursor: pointer;
+            font-family: inherit;
+            text-shadow: 0 1px 3px rgba(0,0,0,0.6);
         }
 
-        .nav-cta:hover {
-            transform: translateY(-1px);
-            box-shadow: 0 16px 32px -12px rgba(91, 78, 255, 1);
-            background: linear-gradient(135deg, #6a5eff 0%, var(--primary-deep) 100%);
+        .nav-links a.nav-link:hover,
+        .nav-links button.nav-link:hover {
+            color: #fff;
+            background: rgba(255, 255, 255, .15);
         }
 
         /* ============================================================
@@ -682,12 +668,9 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
            ============================================================ */
         .hero {
             position: relative;
-            padding: 132px 0 96px;
+            padding: 148px 0 104px;
             overflow: hidden;
-            background:
-                radial-gradient(1100px 620px at 12% -12%, rgba(91, 78, 255, .42) 0%, transparent 62%),
-                radial-gradient(880px 520px at 88% 4%, rgba(34, 211, 238, .24) 0%, transparent 62%),
-                linear-gradient(180deg, var(--navy-950) 0%, var(--navy-900) 42%, #0a1526 100%);
+            background: #0b1424;
         }
 
         .hero::before {
@@ -695,9 +678,8 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
             position: absolute;
             inset: 0;
             background: url('picture/ched.png') center / cover no-repeat;
-            opacity: .12;
-            filter: blur(2px) saturate(1.25);
-            transform: scale(1.06);
+            /* Removed blur, opacity, and filter to make image clear */
+            opacity: 1;
             pointer-events: none;
         }
 
@@ -705,12 +687,8 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
             content: '';
             position: absolute;
             inset: 0;
-            background-image:
-                linear-gradient(rgba(255, 255, 255, .045) 1px, transparent 1px),
-                linear-gradient(90deg, rgba(255, 255, 255, .045) 1px, transparent 1px);
-            background-size: 56px 56px;
-            mask-image: radial-gradient(ellipse 90% 70% at 50% 0%, #000 20%, transparent 78%);
-            -webkit-mask-image: radial-gradient(ellipse 90% 70% at 50% 0%, #000 20%, transparent 78%);
+            /* Kept a very faint gradient overlay just to ensure text remains readable at the top */
+            background: linear-gradient(to bottom, rgba(7, 13, 24, 0.5) 0%, rgba(7, 13, 24, 0.1) 40%, rgba(7, 13, 24, 0.4) 100%);
             pointer-events: none;
         }
 
@@ -725,24 +703,25 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
             text-align: center;
         }
 
-        .hero-copy { max-width: 760px; }
+        .hero-copy { max-width: 780px; }
 
         .hero-eyebrow {
             display: inline-flex;
             align-items: center;
             gap: 8px;
             padding: 6px 14px;
-            margin-bottom: 22px;
+            margin-bottom: 24px;
             border-radius: 999px;
-            border: 1px solid rgba(34, 211, 238, .42);
-            background: rgba(34, 211, 238, .1);
+            border: 1px solid rgba(34, 211, 238, .6);
+            background: rgba(7, 13, 24, .7);
             color: var(--accent-light);
             font-size: .64rem;
             font-weight: 800;
             letter-spacing: .16em;
             text-transform: uppercase;
-            backdrop-filter: blur(6px);
-            -webkit-backdrop-filter: blur(6px);
+            backdrop-filter: blur(4px);
+            -webkit-backdrop-filter: blur(4px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
         }
 
         .hero-eyebrow .dot {
@@ -760,105 +739,121 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
         }
 
         .hero h1 {
-            font-size: clamp(2.05rem, 4.6vw, 3.35rem);
+            font-size: clamp(2.15rem, 4.8vw, 3.5rem);
             font-weight: 900;
-            line-height: 1.1;
-            letter-spacing: -.028em;
+            line-height: 1.08;
+            letter-spacing: -.03em;
             color: #fff;
-            margin-bottom: 20px;
+            margin-bottom: 22px;
+            text-shadow: 0 4px 12px rgba(0,0,0,0.7);
         }
 
         .hero h1 .accent {
-            background: linear-gradient(100deg, #a5f3fc 0%, #22d3ee 45%, #5b4eff 100%);
-            -webkit-background-clip: text;
-            background-clip: text;
-            color: transparent;
+            color: #22d3ee;
+            text-shadow: 0 4px 12px rgba(0,0,0,0.7);
         }
 
         .hero-sub {
-            font-size: 1.02rem;
+            font-size: 1.05rem;
             line-height: 1.72;
-            color: rgba(226, 232, 240, .78);
-            margin-bottom: 30px;
+            color: #f1f5f9;
+            margin-bottom: 34px;
             margin-left: auto;
             margin-right: auto;
-            max-width: 620px;
+            max-width: 640px;
+            text-shadow: 0 2px 8px rgba(0,0,0,0.8);
+            font-weight: 500;
         }
 
+        /* --- Primary CTA row (hero-only) --- */
         .hero-actions {
             display: flex;
             flex-wrap: wrap;
             justify-content: center;
-            gap: 12px;
-            margin-bottom: 34px;
+            gap: 14px;
+            margin-bottom: 38px;
         }
 
-        .btn-primary,
-        .btn-ghost {
+        .btn-hero-primary {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            padding: 15px 32px;
+            border-radius: 14px;
+            font-size: .96rem;
+            font-weight: 800;
+            letter-spacing: .01em;
+            color: #fff;
+            background: linear-gradient(135deg, var(--primary) 0%, var(--primary-dark) 100%);
+            box-shadow: 0 18px 40px -14px rgba(91, 78, 255, 1);
+            transition: var(--transition);
+            border: none;
+            cursor: pointer;
+            font-family: inherit;
+        }
+
+        .btn-hero-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 24px 48px -16px rgba(91, 78, 255, 1);
+            background: linear-gradient(135deg, #6a5eff 0%, var(--primary-deep) 100%);
+        }
+
+        .btn-hero-secondary {
             display: inline-flex;
             align-items: center;
             justify-content: center;
             gap: 9px;
-            padding: 13px 26px;
-            border-radius: 12px;
-            font-size: .9rem;
+            padding: 15px 28px;
+            border-radius: 14px;
+            font-size: .92rem;
             font-weight: 700;
-            letter-spacing: .01em;
-            transition: var(--transition);
-            border: none;
-            cursor: pointer;
-        }
-
-        .btn-primary {
             color: #fff;
-            background: linear-gradient(135deg, var(--primary) 0%, var(--primary-dark) 100%);
-            box-shadow: 0 16px 34px -14px rgba(91, 78, 255, 1);
-        }
-
-        .btn-primary:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 22px 42px -16px rgba(91, 78, 255, 1);
-        }
-
-        .btn-ghost {
-            color: rgba(255, 255, 255, .88);
-            background: rgba(255, 255, 255, .05);
-            border: 1px solid rgba(255, 255, 255, .16);
+            background: rgba(7, 13, 24, .6);
+            border: 1px solid rgba(255, 255, 255, .3);
             backdrop-filter: blur(6px);
             -webkit-backdrop-filter: blur(6px);
+            transition: var(--transition);
+            cursor: pointer;
+            font-family: inherit;
+            text-shadow: 0 1px 3px rgba(0,0,0,0.5);
         }
 
-        .btn-ghost:hover {
-            background: rgba(255, 255, 255, .11);
-            border-color: rgba(34, 211, 238, .55);
-            color: #fff;
+        .btn-hero-secondary:hover {
+            background: rgba(7, 13, 24, .85);
+            border-color: rgba(34, 211, 238, .8);
             transform: translateY(-2px);
         }
 
         .hero-points {
             list-style: none;
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
-            gap: 10px 22px;
-            margin: 0 auto 36px;
-            max-width: 620px;
-            text-align: left;
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 10px 26px;
+            margin: 0 auto 40px;
+            max-width: 680px;
+            background: rgba(7, 13, 24, .4);
+            padding: 12px 20px;
+            border-radius: 12px;
+            backdrop-filter: blur(4px);
+            -webkit-backdrop-filter: blur(4px);
         }
 
         .hero-points li {
             display: flex;
-            align-items: flex-start;
-            gap: 9px;
-            font-size: .82rem;
+            align-items: center;
+            gap: 8px;
+            font-size: .8rem;
             font-weight: 500;
-            color: rgba(226, 232, 240, .74);
+            color: #f1f5f9;
             line-height: 1.5;
+            text-shadow: 0 1px 4px rgba(0,0,0,0.8);
         }
 
         .hero-points li i {
             color: var(--accent);
-            font-size: .78rem;
-            margin-top: 5px;
+            font-size: .72rem;
             flex-shrink: 0;
         }
 
@@ -866,19 +861,20 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
             display: grid;
             grid-template-columns: repeat(4, minmax(0, 1fr));
             gap: 14px;
-            padding-top: 28px;
-            border-top: 1px solid rgba(255, 255, 255, .1);
-            max-width: 620px;
+            padding-top: 32px;
+            border-top: 1px solid rgba(255, 255, 255, .2);
+            max-width: 660px;
             margin: 0 auto;
         }
 
         .hero-stat .value {
-            font-size: 1.32rem;
+            font-size: 1.4rem;
             font-weight: 900;
             letter-spacing: -.02em;
             color: #fff;
             line-height: 1.2;
             font-variant-numeric: tabular-nums;
+            text-shadow: 0 2px 6px rgba(0,0,0,0.8);
         }
 
         .hero-stat .value span { color: var(--accent); }
@@ -888,13 +884,14 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
             font-weight: 700;
             letter-spacing: .13em;
             text-transform: uppercase;
-            color: rgba(148, 163, 184, .85);
-            margin-top: 3px;
+            color: #cbd5e1;
+            margin-top: 4px;
             line-height: 1.4;
+            text-shadow: 0 1px 4px rgba(0,0,0,0.8);
         }
 
         /* ============================================================
-           4. LOGIN MODAL
+           4. LOGIN MODAL — 2-COLUMN DESIGN
            ============================================================ */
         .login-modal-overlay {
             position: fixed;
@@ -904,9 +901,9 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
             align-items: center;
             justify-content: center;
             padding: 24px;
-            background: rgba(5, 9, 15, .78);
-            backdrop-filter: blur(12px) saturate(140%);
-            -webkit-backdrop-filter: blur(12px) saturate(140%);
+            background: rgba(7, 13, 24, .62);
+            backdrop-filter: blur(6px);
+            -webkit-backdrop-filter: blur(6px);
             opacity: 0;
             visibility: hidden;
             transition: opacity .32s ease, visibility .32s ease;
@@ -921,13 +918,14 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
         .login-card {
             position: relative;
             width: 100%;
-            max-width: 420px;
+            max-width: 920px;
             margin: auto;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
             background: #fff;
             border-radius: var(--radius-lg);
-            padding: 34px 30px 26px;
-            box-shadow: var(--shadow-xl), 0 0 0 1px rgba(255, 255, 255, .07);
             overflow: hidden;
+            box-shadow: var(--shadow-xl), 0 0 0 1px rgba(15, 23, 42, .06);
             transform: translateY(24px) scale(.96);
             transition: transform .35s cubic-bezier(.22, 1, .36, 1);
         }
@@ -936,7 +934,159 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
             transform: translateY(0) scale(1);
         }
 
-        .login-card::before {
+        /* --- Left panel (visual/brand) --- */
+        .login-card-visual {
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            padding: 40px 36px;
+            background:
+                radial-gradient(600px 400px at 20% 10%, rgba(91, 78, 255, .5) 0%, transparent 60%),
+                radial-gradient(500px 350px at 90% 90%, rgba(34, 211, 238, .35) 0%, transparent 60%),
+                linear-gradient(160deg, var(--navy-800) 0%, var(--navy-950) 100%);
+            overflow: hidden;
+        }
+
+        .login-card-visual::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background-image:
+                linear-gradient(rgba(255, 255, 255, .04) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255, 255, 255, .04) 1px, transparent 1px);
+            background-size: 40px 40px;
+            mask-image: radial-gradient(ellipse 100% 100% at 0% 0%, #000 30%, transparent 80%);
+            -webkit-mask-image: radial-gradient(ellipse 100% 100% at 0% 0%, #000 30%, transparent 80%);
+            pointer-events: none;
+        }
+
+        .login-visual-brand {
+            position: relative;
+            z-index: 1;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .login-visual-brand img {
+            width: 48px;
+            height: 48px;
+            object-fit: contain;
+        }
+
+        .login-visual-brand .brand-text {
+            display: flex;
+            flex-direction: column;
+            line-height: 1.15;
+        }
+
+        .login-visual-brand .brand-text strong {
+            font-size: .82rem;
+            font-weight: 800;
+            letter-spacing: .05em;
+            text-transform: uppercase;
+            color: #fff;
+        }
+
+        .login-visual-brand .brand-text small {
+            font-size: .55rem;
+            font-weight: 700;
+            letter-spacing: .16em;
+            text-transform: uppercase;
+            color: rgba(125, 211, 252, .85);
+        }
+
+        .login-visual-content {
+            position: relative;
+            z-index: 1;
+            margin: 40px 0;
+        }
+
+        .login-visual-content h3 {
+            font-size: 1.6rem;
+            font-weight: 900;
+            line-height: 1.2;
+            letter-spacing: -.025em;
+            color: #fff;
+            margin-bottom: 14px;
+        }
+
+        .login-visual-content h3 .accent {
+            background: linear-gradient(100deg, #a5f3fc 0%, #22d3ee 100%);
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+        }
+
+        .login-visual-content p {
+            font-size: .86rem;
+            line-height: 1.65;
+            color: rgba(203, 213, 225, .75);
+            margin-bottom: 24px;
+        }
+
+        .login-visual-features {
+            list-style: none;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .login-visual-features li {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: .8rem;
+            font-weight: 500;
+            color: rgba(226, 232, 240, .8);
+        }
+
+        .login-visual-features li i {
+            width: 26px;
+            height: 26px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 8px;
+            font-size: .68rem;
+            line-height: 1;
+            color: var(--accent);
+            background: rgba(34, 211, 238, .12);
+            border: 1px solid rgba(34, 211, 238, .3);
+            flex-shrink: 0;
+        }
+
+        .login-visual-footer {
+            position: relative;
+            z-index: 1;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding-top: 20px;
+            border-top: 1px solid rgba(255, 255, 255, .1);
+            font-size: .68rem;
+            font-weight: 600;
+            color: rgba(148, 163, 184, .7);
+        }
+
+        .login-visual-footer i {
+            color: var(--accent);
+            font-size: .75rem;
+        }
+
+        /* --- Right panel (form) --- */
+        .login-card-form {
+            position: relative;
+            z-index: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            padding: 42px 38px;
+            background: #fff;
+        }
+
+        .login-card-form::before {
             content: '';
             position: absolute;
             top: 0; left: 0; right: 0;
@@ -944,7 +1094,7 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
             background: linear-gradient(90deg, var(--primary) 0%, var(--accent) 55%, var(--primary) 100%);
         }
 
-        .login-card-head { margin-bottom: 20px; }
+        .login-form-head { margin-bottom: 22px; }
 
         .login-badge {
             display: inline-flex;
@@ -964,8 +1114,8 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
 
         .login-badge i { font-size: .64rem; }
 
-        .login-card h2 {
-            font-size: 1.6rem;
+        .login-form-head h2 {
+            font-size: 1.55rem;
             font-weight: 800;
             letter-spacing: -.025em;
             color: var(--gray-900);
@@ -973,8 +1123,8 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
             margin-bottom: 4px;
         }
 
-        .login-card-head p {
-            font-size: .86rem;
+        .login-form-head p {
+            font-size: .84rem;
             font-weight: 500;
             color: var(--gray-500);
         }
@@ -1169,7 +1319,297 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
         }
 
         /* ============================================================
-           5. SECTIONS (shared)
+           5. ABOUT MODAL
+           ============================================================ */
+        .about-modal-overlay {
+            position: fixed;
+            inset: 0;
+            z-index: 480;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+            background: rgba(7, 13, 24, .62);
+            backdrop-filter: blur(6px);
+            -webkit-backdrop-filter: blur(6px);
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity .32s ease, visibility .32s ease;
+            overflow-y: auto;
+        }
+
+        .about-modal-overlay.active {
+            opacity: 1;
+            visibility: visible;
+        }
+
+        .about-modal {
+            position: relative;
+            width: 100%;
+            max-width: 900px; /* Slightly wider to accommodate the long text */
+            margin: auto;
+            background: #fff;
+            border-radius: var(--radius-lg);
+            overflow: hidden;
+            box-shadow: var(--shadow-xl), 0 0 0 1px rgba(15, 23, 42, .06);
+            transform: translateY(24px) scale(.96);
+            transition: transform .35s cubic-bezier(.22, 1, .36, 1);
+        }
+
+        .about-modal-overlay.active .about-modal {
+            transform: translateY(0) scale(1);
+        }
+
+        .about-modal-head {
+            position: relative;
+            padding: 34px 36px 28px;
+            background:
+                radial-gradient(500px 300px at 15% 0%, rgba(91, 78, 255, .45) 0%, transparent 65%),
+                radial-gradient(400px 260px at 95% 100%, rgba(34, 211, 238, .28) 0%, transparent 65%),
+                linear-gradient(160deg, var(--navy-800) 0%, var(--navy-950) 100%);
+            overflow: hidden;
+        }
+
+        .about-modal-head::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background-image:
+                linear-gradient(rgba(255, 255, 255, .04) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255, 255, 255, .04) 1px, transparent 1px);
+            background-size: 40px 40px;
+            mask-image: radial-gradient(ellipse 100% 100% at 0% 0%, #000 30%, transparent 80%);
+            -webkit-mask-image: radial-gradient(ellipse 100% 100% at 0% 0%, #000 30%, transparent 80%);
+            pointer-events: none;
+        }
+
+        .about-modal-head .modal-eyebrow {
+            position: relative;
+            z-index: 1;
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            padding: 5px 12px;
+            margin-bottom: 14px;
+            border-radius: 999px;
+            font-size: .58rem;
+            font-weight: 800;
+            letter-spacing: .16em;
+            text-transform: uppercase;
+            color: var(--accent-light);
+            background: rgba(34, 211, 238, .1);
+            border: 1px solid rgba(34, 211, 238, .4);
+        }
+
+        .about-modal-head h2 {
+            position: relative;
+            z-index: 1;
+            font-size: 1.8rem;
+            font-weight: 900;
+            letter-spacing: -.025em;
+            line-height: 1.2;
+            color: #fff;
+            margin-bottom: 6px;
+        }
+
+        .about-modal-head p {
+            position: relative;
+            z-index: 1;
+            font-size: .9rem;
+            line-height: 1.6;
+            color: rgba(203, 213, 225, .78);
+            max-width: 600px;
+        }
+
+        .about-modal-close {
+            position: absolute;
+            top: 16px;
+            right: 16px;
+            z-index: 2;
+            width: 36px;
+            height: 36px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 50%;
+            border: 1px solid rgba(255, 255, 255, .2);
+            background: rgba(255, 255, 255, .08);
+            color: rgba(255, 255, 255, .8);
+            font-size: .9rem;
+            cursor: pointer;
+            transition: var(--transition);
+        }
+
+        .about-modal-close:hover {
+            background: rgba(255, 255, 255, .18);
+            color: #fff;
+        }
+
+        .about-modal-body {
+            padding: 32px 36px 34px;
+            max-height: 60vh;
+            overflow-y: auto;
+        }
+
+        /* Custom Scrollbar for About Modal */
+        .about-modal-body::-webkit-scrollbar {
+            width: 8px;
+        }
+        .about-modal-body::-webkit-scrollbar-track {
+            background: #f1f1f1; 
+            border-radius: 4px;
+        }
+        .about-modal-body::-webkit-scrollbar-thumb {
+            background: #cbd5e1; 
+            border-radius: 4px;
+        }
+        .about-modal-body::-webkit-scrollbar-thumb:hover {
+            background: #94a3b8; 
+        }
+
+        .about-text-section {
+            margin-bottom: 28px;
+        }
+        .about-text-section h3 {
+            font-size: 1.15rem;
+            font-weight: 800;
+            color: var(--gray-900);
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .about-text-section h3 i {
+            color: var(--primary);
+            font-size: 1rem;
+        }
+        .about-text-section p {
+            font-size: .92rem;
+            line-height: 1.7;
+            color: var(--gray-600);
+            margin-bottom: 12px;
+        }
+
+        .about-goals-list {
+            list-style: none;
+            padding: 0;
+        }
+        .about-goals-list li {
+            position: relative;
+            padding-left: 24px;
+            margin-bottom: 10px;
+            font-size: .92rem;
+            line-height: 1.65;
+            color: var(--gray-600);
+        }
+        .about-goals-list li::before {
+            content: '•';
+            position: absolute;
+            left: 6px;
+            color: var(--primary);
+            font-weight: bold;
+            font-size: 1.2rem;
+            line-height: 1.2;
+        }
+
+        .about-values-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 12px;
+            margin-top: 16px;
+        }
+        .about-value-card {
+            background: var(--gray-50);
+            border: 1px solid var(--gray-200);
+            border-radius: var(--radius);
+            padding: 16px;
+            display: flex;
+            gap: 12px;
+            align-items: flex-start;
+        }
+        .about-value-letter {
+            font-size: 1.6rem;
+            font-weight: 900;
+            color: var(--primary);
+            line-height: 1;
+            flex-shrink: 0;
+            width: 24px;
+            text-align: center;
+        }
+        .about-value-text {
+            font-size: .85rem;
+            line-height: 1.5;
+            color: var(--gray-700);
+            font-weight: 500;
+        }
+
+        .about-modal-footer {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+            padding: 20px 36px 26px;
+            border-top: 1px solid var(--gray-100);
+            flex-wrap: wrap;
+            background: var(--gray-50);
+        }
+
+        .about-modal-footer .about-modal-meta {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .about-modal-footer .about-modal-meta img {
+            width: 38px;
+            height: 38px;
+            border-radius: 50%;
+            object-fit: cover;
+            border: 2px solid var(--primary-light);
+            padding: 1px;
+        }
+
+        .about-modal-footer .about-modal-meta div {
+            line-height: 1.25;
+        }
+
+        .about-modal-footer .about-modal-meta strong {
+            display: block;
+            font-size: .78rem;
+            font-weight: 800;
+            color: var(--gray-900);
+        }
+
+        .about-modal-footer .about-modal-meta small {
+            font-size: .66rem;
+            font-weight: 600;
+            color: var(--gray-400);
+        }
+
+        .btn-modal-action {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 11px 22px;
+            border-radius: 10px;
+            font-size: .84rem;
+            font-weight: 700;
+            color: #fff;
+            background: linear-gradient(135deg, var(--primary) 0%, var(--primary-dark) 100%);
+            box-shadow: 0 10px 24px -12px rgba(91, 78, 255, 1);
+            border: none;
+            cursor: pointer;
+            transition: var(--transition);
+            font-family: inherit;
+        }
+
+        .btn-modal-action:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 16px 32px -14px rgba(91, 78, 255, 1);
+        }
+
+        /* ============================================================
+           6. SECTIONS (shared)
            ============================================================ */
         .section { padding: 92px 0; }
 
@@ -1210,211 +1650,6 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
             font-size: .96rem;
             line-height: 1.7;
             color: var(--gray-500);
-        }
-
-        /* ============================================================
-           6. ABOUT US
-           ============================================================ */
-        .about-section {
-            position: relative;
-            background: linear-gradient(180deg, #f7f8fc 0%, #ffffff 100%);
-            overflow: hidden;
-        }
-
-        .about-section::before {
-            content: '';
-            position: absolute;
-            top: -180px;
-            right: -180px;
-            width: 520px;
-            height: 520px;
-            border-radius: 50%;
-            background: radial-gradient(circle, rgba(91, 78, 255, .08) 0%, transparent 70%);
-            pointer-events: none;
-        }
-
-        .about-section::after {
-            content: '';
-            position: absolute;
-            bottom: -180px;
-            left: -180px;
-            width: 480px;
-            height: 480px;
-            border-radius: 50%;
-            background: radial-gradient(circle, rgba(34, 211, 238, .08) 0%, transparent 70%);
-            pointer-events: none;
-        }
-
-        .about-grid {
-            position: relative;
-            display: grid;
-            grid-template-columns: 1.25fr 1fr;
-            gap: 60px;
-            align-items: center;
-        }
-
-        .about-content .section-eyebrow {
-            margin-bottom: 16px;
-        }
-
-        .about-content h2 {
-            font-size: clamp(1.75rem, 3.4vw, 2.45rem);
-            font-weight: 900;
-            letter-spacing: -.028em;
-            line-height: 1.18;
-            color: var(--gray-900);
-            margin-bottom: 16px;
-        }
-
-        .about-lead {
-            font-size: 1.05rem;
-            line-height: 1.7;
-            color: var(--gray-700);
-            font-weight: 500;
-            margin-bottom: 14px;
-        }
-
-        .about-content > p.about-body {
-            font-size: .92rem;
-            line-height: 1.75;
-            color: var(--gray-500);
-            margin-bottom: 26px;
-        }
-
-        .about-highlights {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 14px;
-        }
-
-        .about-highlight {
-            display: flex;
-            gap: 12px;
-            padding: 18px;
-            background: #fff;
-            border: 1px solid var(--gray-200);
-            border-radius: var(--radius);
-            transition: var(--transition);
-        }
-
-        .about-highlight:hover {
-            border-color: #dcd8ff;
-            transform: translateY(-2px);
-            box-shadow: var(--shadow-md);
-        }
-
-        .about-highlight > i {
-            width: 38px;
-            height: 38px;
-            flex-shrink: 0;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            border-radius: 10px;
-            font-size: .95rem;
-            color: var(--primary);
-            background: linear-gradient(135deg, var(--primary-light) 0%, var(--accent-soft) 100%);
-            border: 1px solid #e6e2ff;
-        }
-
-        .about-highlight strong {
-            display: block;
-            font-size: .88rem;
-            font-weight: 800;
-            color: var(--gray-900);
-            margin-bottom: 3px;
-            letter-spacing: -.005em;
-        }
-
-        .about-highlight span {
-            font-size: .76rem;
-            line-height: 1.55;
-            color: var(--gray-500);
-        }
-
-        .about-visual {
-            display: flex;
-            justify-content: center;
-        }
-
-        .about-card {
-            position: relative;
-            width: 100%;
-            max-width: 380px;
-            padding: 44px 32px 32px;
-            text-align: center;
-            background: #fff;
-            border-radius: var(--radius-lg);
-            border: 1px solid var(--gray-200);
-            box-shadow: var(--shadow-lg);
-            overflow: hidden;
-        }
-
-        .about-card::before {
-            content: '';
-            position: absolute;
-            top: 0; left: 0; right: 0;
-            height: 5px;
-            background: linear-gradient(90deg, var(--primary) 0%, var(--accent) 55%, var(--primary) 100%);
-        }
-
-        .about-card img {
-            width: 96px;
-            height: 96px;
-            margin: 0 auto 20px;
-            border-radius: 50%;
-            object-fit: cover;
-            padding: 3px;
-            background: #fff;
-            border: 2px solid var(--primary-light);
-            box-shadow: 0 12px 26px -10px rgba(91, 78, 255, .4);
-        }
-
-        .about-card h3 {
-            font-size: 1.25rem;
-            font-weight: 900;
-            color: var(--gray-900);
-            letter-spacing: -.02em;
-            margin-bottom: 4px;
-            line-height: 1.25;
-        }
-
-        .about-card > p {
-            font-size: .82rem;
-            color: var(--gray-500);
-            margin-bottom: 22px;
-        }
-
-        .about-badges {
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-        }
-
-        .about-badges span {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            gap: 8px;
-            padding: 10px 14px;
-            border-radius: 10px;
-            font-size: .76rem;
-            font-weight: 700;
-            color: var(--gray-700);
-            background: var(--gray-50);
-            border: 1px solid var(--gray-200);
-            transition: var(--transition);
-        }
-
-        .about-badges span:hover {
-            background: var(--primary-light);
-            border-color: #ddd9ff;
-            color: var(--primary-dark);
-        }
-
-        .about-badges span i {
-            color: var(--primary);
-            font-size: .82rem;
         }
 
         /* ============================================================
@@ -1650,76 +1885,7 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
         }
 
         /* ============================================================
-           10. SECURITY BAND
-           ============================================================ */
-        .security-band {
-            position: relative;
-            padding: 84px 0;
-            overflow: hidden;
-            background:
-                radial-gradient(800px 420px at 80% 0%, rgba(34, 211, 238, .18) 0%, transparent 62%),
-                radial-gradient(700px 400px at 10% 100%, rgba(91, 78, 255, .3) 0%, transparent 62%),
-                linear-gradient(160deg, var(--navy-800) 0%, var(--navy-950) 100%);
-        }
-
-        .security-band .section-head { margin-bottom: 44px; }
-        .security-band .section-head h2 { color: #fff; }
-        .security-band .section-head p  { color: rgba(203, 213, 225, .72); }
-
-        .security-band .section-eyebrow {
-            color: var(--accent-light);
-            background: rgba(34, 211, 238, .1);
-            border-color: rgba(34, 211, 238, .4);
-        }
-
-        .security-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-            gap: 18px;
-        }
-
-        .security-item {
-            display: flex;
-            align-items: flex-start;
-            gap: 14px;
-            padding: 20px;
-            border-radius: var(--radius);
-            background: rgba(255, 255, 255, .045);
-            border: 1px solid rgba(255, 255, 255, .1);
-            transition: var(--transition);
-        }
-
-        .security-item:hover {
-            background: rgba(255, 255, 255, .08);
-            border-color: rgba(34, 211, 238, .45);
-        }
-
-        .security-item > i {
-            font-size: 1rem;
-            color: var(--accent);
-            margin-top: 4px;
-            flex-shrink: 0;
-            width: 20px;
-            text-align: center;
-        }
-
-        .security-item strong {
-            display: block;
-            font-size: .87rem;
-            font-weight: 700;
-            color: #fff;
-            margin-bottom: 3px;
-            letter-spacing: -.005em;
-        }
-
-        .security-item span {
-            font-size: .78rem;
-            line-height: 1.6;
-            color: rgba(203, 213, 225, .68);
-        }
-
-        /* ============================================================
-           11. CTA + FOOTER
+           10. CTA + FOOTER
            ============================================================ */
         .cta {
             padding: 76px 0;
@@ -1778,6 +1944,7 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
             white-space: nowrap;
             border: none;
             cursor: pointer;
+            font-family: inherit;
         }
 
         .btn-light:hover {
@@ -1794,11 +1961,20 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
 
         .footer-grid {
             display: grid;
-            grid-template-columns: 1.6fr 1fr 1fr 1.2fr;
+            grid-template-columns: 1.5fr 1fr 1fr 1.5fr;
             gap: 40px;
             padding-bottom: 46px;
         }
 
+        .logo-title {
+            display: flex;
+             flex-direction: column;
+             line-height: 1.1;
+        }
+
+        .logo-title .accent {
+            display: block;
+        }
         .footer-brand .footer-logo {
             display: flex;
             align-items: center;
@@ -1871,107 +2047,85 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
         .footer-col a:hover,
         .footer-col .footer-link:hover { color: var(--accent-light); }
 
-        .footer-col .footer-note {
-            font-size: .78rem;
-            line-height: 1.65;
-            color: rgba(148, 163, 184, .78);
+        .footer-col ul.footer-contact {
+            list-style: none;
+            margin: 0 0 14px;
         }
 
-        .footer-col .footer-note strong {
+        .footer-col ul.footer-contact li {
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            margin-bottom: 14px;
+            font-size: .82rem;
+            line-height: 1.5;
+            color: rgba(203, 213, 225, .74);
+        }
+
+        .footer-col ul.footer-contact li > i {
+            color: var(--accent);
+            font-size: .88rem;
+            margin-top: 4px;
+            flex-shrink: 0;
+            width: 14px;
+            text-align: center;
+        }
+
+        .footer-col ul.footer-contact a {
+            color: rgba(203, 213, 225, .74);
+            transition: color .2s;
+            display: block;
+        }
+
+        .footer-col ul.footer-contact a:hover {
+            color: var(--accent-light);
+        }
+
+        .footer-col ul.footer-contact a strong {
+            display: block;
             color: rgba(226, 232, 240, .92);
             font-weight: 700;
+            font-size: .82rem;
+            margin-bottom: 2px;
+            line-height: 1.35;
         }
-        /* Footer — contact & social */
-.footer-grid {
-    grid-template-columns: 1.5fr 1fr 1fr 1.5fr; /* give contact column more room */
-}
 
-.footer-col ul.footer-contact {
-    list-style: none;
-    margin: 0 0 14px;
-}
+        .footer-col ul.footer-contact a small {
+            display: block;
+            font-size: .72rem;
+            font-weight: 500;
+            color: rgba(148, 163, 184, .72);
+            line-height: 1.5;
+            transition: color .2s;
+        }
 
-.footer-col ul.footer-contact li {
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    margin-bottom: 14px;
-    font-size: .82rem;
-    line-height: 1.5;
-    color: rgba(203, 213, 225, .74);
-}
+        .footer-col ul.footer-contact a:hover small {
+            color: var(--accent-light);
+        }
 
-.footer-col ul.footer-contact li > i {
-    color: var(--accent);
-    font-size: .88rem;
-    margin-top: 4px;
-    flex-shrink: 0;
-    width: 14px;
-    text-align: center;
-}
+        .footer-social {
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 16px;
+            border-radius: 10px;
+            font-size: .78rem;
+            font-weight: 700;
+            letter-spacing: .01em;
+            color: #fff !important;
+            background: linear-gradient(135deg, #1877f2 0%, #0d5fcc 100%);
+            box-shadow: 0 8px 18px -8px rgba(24, 119, 242, .7);
+            transition: var(--transition);
+            margin-top: 2px;
+        }
 
-.footer-col ul.footer-contact a {
-    color: rgba(203, 213, 225, .74);
-    transition: color .2s;
-    display: block;
-}
+        .footer-social:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 12px 24px -10px rgba(24, 119, 242, .95);
+            background: linear-gradient(135deg, #2585f5 0%, #1068d8 100%);
+        }
 
-.footer-col ul.footer-contact a:hover {
-    color: var(--accent-light);
-}
-
-.footer-col ul.footer-contact a strong {
-    display: block;
-    color: rgba(226, 232, 240, .92);
-    font-weight: 700;
-    font-size: .82rem;
-    margin-bottom: 2px;
-    line-height: 1.35;
-}
-
-.footer-col ul.footer-contact a small {
-    display: block;
-    font-size: .72rem;
-    font-weight: 500;
-    color: rgba(148, 163, 184, .72);
-    line-height: 1.5;
-    transition: color .2s;
-}
-
-.footer-col ul.footer-contact a:hover small {
-    color: var(--accent-light);
-}
-
-/* "Follow us on Facebook" button */
-.footer-social {
-    display: inline-flex;
-    align-items: center;
-    gap: 10px;
-    padding: 10px 16px;
-    border-radius: 10px;
-    font-size: .78rem;
-    font-weight: 700;
-    letter-spacing: .01em;
-    color: #fff !important;
-    background: linear-gradient(135deg, #1877f2 0%, #0d5fcc 100%);
-    box-shadow: 0 8px 18px -8px rgba(24, 119, 242, .7);
-    transition: var(--transition);
-    margin-top: 2px;
-}
-
-.footer-social:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 12px 24px -10px rgba(24, 119, 242, .95);
-    background: linear-gradient(135deg, #2585f5 0%, #1068d8 100%);
-}
-
-.footer-social i {
-    font-size: .95rem;
-}
-
-@media (max-width: 1040px) {
-    .footer-grid { grid-template-columns: 1fr 1fr; gap: 34px; }
-}
+        .footer-social i { font-size: .95rem; }
 
         .footer-bottom {
             display: flex;
@@ -2160,7 +2314,8 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
                 transition-duration: .001ms !important;
             }
             .js .reveal { opacity: 1; transform: none; }
-            .login-card { transform: none !important; }
+            .login-card,
+            .about-modal { transform: none !important; }
         }
 
         /* ============================================================
@@ -2168,54 +2323,61 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
            ============================================================ */
         @media (max-width: 1040px) {
             .footer-grid { grid-template-columns: 1fr 1fr; gap: 34px; }
-            .about-grid {
-                grid-template-columns: 1fr;
-                gap: 40px;
-            }
-            .about-visual { order: -1; }
         }
 
         @media (max-width: 860px) {
-            .nav-links a.nav-link { display: none; }
+            .nav-links a.nav-link,
+            .nav-links button.nav-link { display: none; }
             .section { padding: 72px 0; }
-            .hero { padding: 116px 0 76px; }
+            .hero { padding: 128px 0 84px; }
             .section-head { margin-bottom: 40px; }
             .cta-inner { flex-direction: column; text-align: center; }
             .cta-text p { margin: 0 auto; }
+
+            .login-card {
+                grid-template-columns: 1fr;
+                max-width: 440px;
+            }
+            .login-card-visual {
+                display: none;
+            }
+            .login-card-form {
+                padding: 38px 30px;
+            }
+            
+            .about-values-grid {
+                grid-template-columns: 1fr;
+            }
         }
 
         @media (max-width: 600px) {
             .container { padding: 0 18px; }
             .nav-brand .brand-text strong { font-size: .78rem; }
             .nav-brand .brand-text small { font-size: .52rem; letter-spacing: .13em; }
-            .nav-cta { padding: 9px 16px; font-size: .76rem; }
             .nav-brand img { width: 36px; height: 36px; }
 
-            .hero { padding: 104px 0 64px; }
-            .hero h1 { font-size: clamp(1.85rem, 8vw, 2.3rem); }
+            .hero { padding: 118px 0 68px; }
+            .hero h1 { font-size: clamp(1.85rem, 8vw, 2.35rem); }
             .hero-sub { font-size: .93rem; }
-            .hero-points { grid-template-columns: 1fr; gap: 9px; }
+            .hero-points { flex-direction: column; align-items: center; gap: 9px; background: transparent; padding: 0; }
+            .hero-points li { text-align: center; }
             .hero-stats { grid-template-columns: repeat(2, 1fr); gap: 18px 12px; }
-            .hero-stat .value { font-size: 1.18rem; }
-            .hero-actions .btn-primary,
-            .hero-actions .btn-ghost { flex: 1 1 100%; }
+            .hero-stat .value { font-size: 1.2rem; }
+            .hero-actions .btn-hero-primary,
+            .hero-actions .btn-hero-secondary { flex: 1 1 100%; }
 
             .login-modal-overlay {
                 padding: 16px;
                 align-items: flex-start;
                 padding-top: 40px;
             }
-            .login-card { padding: 28px 20px 22px; border-radius: 18px; }
-            .login-card h2 { font-size: 1.4rem; }
-
-            .about-highlights { grid-template-columns: 1fr; }
-            .about-card { padding: 36px 24px 26px; }
+            .login-card { border-radius: 18px; }
+            .login-card-form { padding: 30px 22px; }
+            .login-form-head h2 { font-size: 1.35rem; }
 
             .feature-card { padding: 24px 20px; }
             .step { padding: 24px 20px; }
             .role-card { padding: 26px 22px; }
-
-            .security-item { padding: 16px; }
 
             .footer { padding-top: 48px; }
             .footer-grid { grid-template-columns: 1fr; gap: 28px; padding-bottom: 34px; }
@@ -2224,13 +2386,27 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
             .lock-modal { padding: 26px 18px 20px; }
             .lock-timer { font-size: 2rem; }
             .lock-modal-icon { width: 58px; height: 58px; font-size: 1.45rem; }
+
+            .about-modal-overlay {
+                padding: 16px;
+                align-items: flex-start;
+                padding-top: 40px;
+            }
+            .about-modal-head { padding: 28px 22px 22px; }
+            .about-modal-head h2 { font-size: 1.35rem; }
+            .about-modal-body { padding: 24px 22px 26px; max-height: 55vh; }
+            .about-modal-footer {
+                padding: 18px 22px 22px;
+                flex-direction: column;
+                align-items: flex-start;
+            }
         }
     </style>
 
     <noscript>
         <style>
-            /* No-JS fallback: force the login modal open so users can still log in */
-            .login-modal-overlay { opacity: 1 !important; visibility: visible !important; }
+            .login-modal-overlay,
+            .about-modal-overlay { opacity: 1 !important; visibility: visible !important; }
             body { overflow: hidden !important; }
         </style>
     </noscript>
@@ -2251,14 +2427,10 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
         </a>
 
         <div class="nav-links">
-            <a href="#about" class="nav-link">About</a>
+            <button type="button" class="nav-link js-open-about">About</button>
             <a href="#features" class="nav-link">Features</a>
             <a href="#how" class="nav-link">How it works</a>
             <a href="#roles" class="nav-link">Roles</a>
-            <a href="#security" class="nav-link">Security</a>
-            <button type="button" class="nav-cta js-open-login">
-                <i class="fas fa-right-to-bracket"></i> Sign In
-            </button>
         </div>
     </div>
 </nav>
@@ -2273,10 +2445,10 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
                 <span class="dot"></span> Official Institutional Portal
             </span>
 
-            <h1>
-                Compliance &amp; document management,
-                <span class="accent">simplified.</span>
-            </h1>
+<h1 class="logo-title">
+    <span>CHED Compliance</span>
+    <span class="accent">Repository.</span>
+</h1>
 
             <p class="hero-sub">
                 One secure portal for CHED compliance submissions, accreditation
@@ -2285,12 +2457,12 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
             </p>
 
             <div class="hero-actions">
-                <button type="button" class="btn-primary js-open-login">
+                <button type="button" class="btn-hero-primary js-open-login">
                     <i class="fas fa-right-to-bracket"></i> Sign in to your portal
                 </button>
-                <a href="#about" class="btn-ghost">
+                <button type="button" class="btn-hero-secondary js-open-about">
                     <i class="fas fa-circle-info"></i> About the institution
-                </a>
+                </button>
             </div>
 
             <ul class="hero-points">
@@ -2323,8 +2495,7 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
 </header>
 
 <!-- ============================================================
-     LOGIN MODAL (opens on any .js-open-login trigger)
-     - Closes on backdrop click OR Esc key
+     LOGIN MODAL
      ============================================================ -->
 <div class="login-modal-overlay"
      id="loginOverlay"
@@ -2332,64 +2503,113 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
      data-auto-open="<?= $auto_open_login ? '1' : '0' ?>">
     <div class="login-card" id="login" role="dialog" aria-modal="true" aria-labelledby="loginTitle">
 
-        <div class="login-card-head">
-            <span class="login-badge"><i class="fas fa-user-shield"></i> Secure Portal Access</span>
-            <h2 id="loginTitle">Welcome back</h2>
-            <p>Sign in to access your compliance dashboard</p>
+        <!-- LEFT: Visual / Brand panel -->
+        <div class="login-card-visual">
+            <div class="login-visual-brand">
+                <img src="picture/love.jpg" alt="USAT College Sagay City Inc. logo">
+                <div class="brand-text">
+                    <strong>USAT College</strong>
+                    <small>Sagay City Inc.</small>
+                </div>
+            </div>
+
+            <div class="login-visual-content">
+                <h3>
+                    Welcome to your<br>
+                    <span class="accent">compliance portal.</span>
+                </h3>
+                <p>
+                    Access your personalized dashboard, manage compliance
+                    documents, and stay informed about your CHED requirements.
+                </p>
+
+                <ul class="login-visual-features">
+                    <li>
+                        <i class="fas fa-shield-alt"></i>
+                        <span>Secure Document Access</span>
+                    </li>
+                    <li>
+                        <i class="fas fa-clock"></i>
+                        <span>Real-Time Submission Tracking</span>
+                    </li>
+                    <li>
+                        <i class="fas fa-bell"></i>
+                        <span>Instant Deadline Notifications</span>
+                    </li>
+                    <li>
+                        <i class="fas fa-clipboard-list"></i>
+                        <span>Comprehensive Activity Audit Trail</span>
+                    </li>
+                </ul>
+            </div>
+
+            <div class="login-visual-footer">
+                <i class="fas fa-lock"></i>
+                <span>Authorized access only &middot; All activity is logged</span>
+            </div>
         </div>
 
-        <?php if (!$is_locked && $error): ?>
-            <div class="alert">
-                <i class="fas fa-exclamation-circle"></i>
-                <span><?= htmlspecialchars($error) ?></span>
+        <!-- RIGHT: Form panel -->
+        <div class="login-card-form">
+            <div class="login-form-head">
+                <span class="login-badge"><i class="fas fa-user-shield"></i> Secure Portal Access</span>
+                <h2 id="loginTitle">Welcome back</h2>
+                <p>Sign in to access your compliance workspace.</p>
             </div>
-        <?php endif; ?>
 
-        <form method="POST" id="loginForm">
-            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>">
-
-            <div class="form-group">
-                <label for="email"><i class="fas fa-envelope"></i> Email Address</label>
-                <div class="input-wrapper">
-                    <input type="email" class="form-control" id="email" name="email"
-                           value="<?= htmlspecialchars($email) ?>"
-                           placeholder="name@usat.edu.ph" required
-                           autocomplete="username"
-                           <?= $is_locked ? 'disabled' : '' ?>>
+            <?php if (!$is_locked && $error): ?>
+                <div class="alert">
+                    <i class="fas fa-exclamation-circle"></i>
+                    <span><?= htmlspecialchars($error) ?></span>
                 </div>
-            </div>
+            <?php endif; ?>
 
-            <div class="form-group">
-                <label for="password"><i class="fas fa-lock"></i> Password</label>
-                <div class="input-wrapper">
-                    <input type="password" class="form-control" id="password" name="password"
-                           placeholder="••••••••" required
-                           autocomplete="current-password"
-                           <?= $is_locked ? 'disabled' : '' ?>>
-                    <button type="button" class="password-toggle" id="togglePassword"
-                            aria-label="Toggle password visibility"
-                            title="Show password"
-                            <?= $is_locked ? 'disabled' : '' ?>>
-                        <i class="fas fa-eye-slash"></i>
-                    </button>
+            <form method="POST" id="loginForm">
+                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>">
+
+                <div class="form-group">
+                    <label for="email"><i class="fas fa-envelope"></i> Email Address</label>
+                    <div class="input-wrapper">
+                        <input type="email" class="form-control" id="email" name="email"
+                               value="<?= htmlspecialchars($email) ?>"
+                               placeholder="name@usat.edu.ph" required
+                               autocomplete="username"
+                               <?= $is_locked ? 'disabled' : '' ?>>
+                    </div>
                 </div>
-            </div>
 
-            <button type="submit" class="btn-submit" id="submitBtn" <?= $is_locked ? 'disabled' : '' ?>>
-                <i class="fas fa-sign-in-alt"></i> Sign In
-            </button>
-        </form>
+                <div class="form-group">
+                    <label for="password"><i class="fas fa-lock"></i> Password</label>
+                    <div class="input-wrapper">
+                        <input type="password" class="form-control" id="password" name="password"
+                               placeholder="••••••••" required
+                               autocomplete="current-password"
+                               <?= $is_locked ? 'disabled' : '' ?>>
+                        <button type="button" class="password-toggle" id="togglePassword"
+                                aria-label="Toggle password visibility"
+                                title="Show password"
+                                <?= $is_locked ? 'disabled' : '' ?>>
+                            <i class="fas fa-eye-slash"></i>
+                        </button>
+                    </div>
+                </div>
 
-        <div class="login-card-foot">
-            <div class="security-note">
-                <i class="fas fa-shield-halved"></i>
-                <p>
-                    Authorized access only. All activities are monitored and logged.
-                    <span>Contact the System Administrator for credentials.</span>
-                </p>
-            </div>
-            <div class="login-copyright">
-                &copy; 2026 <strong>USAT College Sagay City Inc.</strong> &middot; All rights reserved.
+                <button type="submit" class="btn-submit" id="submitBtn" <?= $is_locked ? 'disabled' : '' ?>>
+                    <i class="fas fa-sign-in-alt"></i> Sign In
+                </button>
+            </form>
+
+            <div class="login-card-foot">
+                <div class="security-note">
+                    <i class="fas fa-shield-alt"></i>
+                    <p>
+                        Authorized access only. All activities are monitored and logged.
+                        <span>Contact the System Administrator for credentials.</span>
+                    </p>
+                </div>
+                <div class="login-copyright">
+                    &copy; 2026 <strong>USAT College Sagay City Inc.</strong> &middot; All rights reserved.
+                </div>
             </div>
         </div>
 
@@ -2397,67 +2617,111 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
 </div><!-- /.login-modal-overlay -->
 
 <!-- ============================================================
-     ABOUT US
+     ABOUT MODAL (Updated Content)
      ============================================================ -->
-<section class="section about-section" id="about">
-    <div class="container">
-        <div class="about-grid">
+<div class="about-modal-overlay" id="aboutOverlay" aria-hidden="true">
+    <div class="about-modal" role="dialog" aria-modal="true" aria-labelledby="aboutTitle">
 
-            <div class="about-content reveal">
-                <span class="section-eyebrow">
-                    <i class="fas fa-building-columns"></i> About the Institution
-                </span>
-                <h2>USAT College Sagay City Inc.</h2>
+        <div class="about-modal-head">
+            <button type="button" class="about-modal-close js-close-about" aria-label="Close about dialog">
+                <i class="fas fa-times"></i>
+            </button>
 
-                <p class="about-lead">
-                    A leading higher education institution in Negros Occidental,
-                    committed to academic excellence, innovation, and community service.
+            <span class="modal-eyebrow">
+                <i class="fas fa-building-columns"></i> About the Institution
+            </span>
+            <h2 id="aboutTitle">About USAT College</h2>
+            <p>
+                USAT College Sagay City, Inc. — Developing well-rounded, God-fearing, and globally competent individuals.
+            </p>
+        </div>
+
+        <div class="about-modal-body">
+            
+            <div class="about-text-section">
+                <h3><i class="fas fa-eye"></i> Vision</h3>
+                <p>
+                    Our vision is to develop well rounded, God fearing and globally competent individuals who will thrive in a diverse, evolving global society.
                 </p>
-
-                <p class="about-body">
-                    The Compliance &amp; Document Management System was developed to
-                    streamline the institution's partnership with the Commission on
-                    Higher Education (CHED). It centralizes submissions, accreditation
-                    documents, and institutional reports — eliminating scattered files,
-                    manual follow-ups, and lost email threads. Every department,
-                    program head, and faculty member can work from one trusted source
-                    of truth, secured end-to-end.
-                </p>
-
-                <div class="about-highlights">
-                    <div class="about-highlight">
-                        <i class="fas fa-bullseye"></i>
-                        <div>
-                            <strong>Our Mission</strong>
-                            <span>Deliver quality education that produces globally competitive, values-driven graduates.</span>
-                        </div>
-                    </div>
-                    <div class="about-highlight">
-                        <i class="fas fa-eye"></i>
-                        <div>
-                            <strong>Our Vision</strong>
-                            <span>A premier institution for academic excellence and social transformation in the region.</span>
-                        </div>
-                    </div>
-                </div>
             </div>
 
-            <div class="about-visual reveal">
-                <div class="about-card">
-                    <img src="picture/love.jpg" alt="USAT College Sagay City Inc. logo">
-                    <h3>USAT College<br>Sagay City Inc.</h3>
-                    <p>Sagay City, Negros Occidental</p>
-                    <div class="about-badges">
-                        <span><i class="fas fa-award"></i> CHED-Recognized Programs</span>
-                        <span><i class="fas fa-graduation-cap"></i> Accredited Curriculum</span>
-                        <span><i class="fas fa-shield-halved"></i> Secure Compliance Portal</span>
+            <div class="about-text-section">
+                <h3><i class="fas fa-bullseye"></i> Mission</h3>
+                <p>
+                    Our mission is to provide training and Christ-centered education, considering other religious beliefs, in a safe, respectful and Godly environment for students to become globally competent, skilled lifelong learners, responsible leaders, and ready to meet the demands and challenges of the future.
+                </p>
+            </div>
+
+            <div class="about-text-section">
+                <h3><i class="fas fa-list-check"></i> Goals</h3>
+                <ul class="about-goals-list">
+                    <li>Promote Intellectual, social and spiritual growth and development among students to become productive members of the society.</li>
+                    <li>Develop and enhance educational/instructional programs that will challenge all students to perform at their highest potential.</li>
+                    <li>Provide comprehensive educational facilities, resources and services to accommodate a life-developing curriculum and necessities.</li>
+                    <li>Promote community involvement through educational and social programs.</li>
+                    <li>Provide efficient and effective leadership for students, faculty, staff and stakeholders.</li>
+                    <li>Employ and develop high qualified and competent staff to carry out the USAT COLLEGE SAGAY CITY, INC. mission, vision and goals.</li>
+                </ul>
+            </div>
+
+            <div class="about-text-section">
+                <h3><i class="fas fa-heart"></i> Core Values - USATIANS</h3>
+                <div class="about-values-grid">
+                    <div class="about-value-card">
+                        <div class="about-value-letter">U</div>
+                        <div class="about-value-text">Uniqueness appreciation of one another</div>
                     </div>
+                    <div class="about-value-card">
+                        <div class="about-value-letter">S</div>
+                        <div class="about-value-text">Spiritual-fulfilled individual</div>
+                    </div>
+                    <div class="about-value-card">
+                        <div class="about-value-letter">A</div>
+                        <div class="about-value-text">Applied Scholarship, Service and Life-long learning</div>
+                    </div>
+                    <div class="about-value-card">
+                        <div class="about-value-letter">T</div>
+                        <div class="about-value-text">Teaching Excellence and Educational Innovation</div>
+                    </div>
+                    <div class="about-value-card">
+                        <div class="about-value-letter">I</div>
+                        <div class="about-value-text">Integrity to strive and do the right thing at all times</div>
+                    </div>
+                    <div class="about-value-card">
+                        <div class="about-value-letter">A</div>
+                        <div class="about-value-text">A Distinct Culture of Collaboration and Inclusion</div>
+                    </div>
+                    <div class="about-value-card">
+                        <div class="about-value-letter">N</div>
+                        <div class="about-value-text">Nurturing Individual Potential</div>
+                    </div>
+                    <div class="about-value-card">
+                        <div class="about-value-letter">S</div>
+                        <div class="about-value-text">Sustaining Development goals</div>
+                    </div>
+                </div>
+                <div style="text-align: center; margin-top: 24px; font-weight: 800; color: var(--primary); font-size: 1.1rem; letter-spacing: 0.05em;">
+                    WE ARE USAT, WE ARE THE FUTURE
                 </div>
             </div>
 
         </div>
-    </div>
-</section>
+
+        <div class="about-modal-footer">
+            <div class="about-modal-meta">
+                <img src="picture/love.jpg" alt="USAT College Sagay City Inc. logo">
+                <div>
+                    <strong>USAT College Sagay City Inc.</strong>
+                    <small>Sagay City, Negros Occidental</small>
+                </div>
+            </div>
+            <button type="button" class="btn-modal-action js-open-login-from-about">
+                <i class="fas fa-right-to-bracket"></i> Go to Sign In
+            </button>
+        </div>
+
+    </div><!-- /.about-modal -->
+</div><!-- /.about-modal-overlay -->
 
 <!-- ============================================================
      FEATURES
@@ -2595,75 +2859,9 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
                 <div class="role-tags">
                     <span>Uploads</span>
                     <span>Status</span>
-                    <span>Requests</span>
+                    <span>Review</span>
                 </div>
             </article>
-
-        </div>
-    </div>
-</section>
-
-<!-- ============================================================
-     SECURITY BAND
-     ============================================================ -->
-<section class="security-band" id="security">
-    <div class="container">
-
-        <div class="section-head reveal">
-            <span class="section-eyebrow"><i class="fas fa-fingerprint"></i> Security first</span>
-            <h2>Your documents are protected at every layer</h2>
-            <p>The portal is engineered with defense in depth — not bolted on afterwards.</p>
-        </div>
-
-        <div class="security-grid">
-
-            <div class="security-item reveal">
-                <i class="fas fa-key"></i>
-                <div>
-                    <strong>Bcrypt password hashing</strong>
-                    <span>Passwords are never stored in plain text and are re-hashed automatically when standards change.</span>
-                </div>
-            </div>
-
-            <div class="security-item reveal">
-                <i class="fas fa-shield-halved"></i>
-                <div>
-                    <strong>CSRF protection</strong>
-                    <span>Every form submission is validated against a per-session token.</span>
-                </div>
-            </div>
-
-            <div class="security-item reveal">
-                <i class="fas fa-rotate"></i>
-                <div>
-                    <strong>Session hardening</strong>
-                    <span>Session IDs are regenerated periodically and on every successful sign-in.</span>
-                </div>
-            </div>
-
-            <div class="security-item reveal">
-                <i class="fas fa-mobile-screen-button"></i>
-                <div>
-                    <strong>Device lockout</strong>
-                    <span>Repeated failures from one device trigger a temporary, automatic lockout.</span>
-                </div>
-            </div>
-
-            <div class="security-item reveal">
-                <i class="fas fa-gauge-high"></i>
-                <div>
-                    <strong>IP rate limiting</strong>
-                    <span>Mass-attack patterns are throttled before they can reach the authentication layer.</span>
-                </div>
-            </div>
-
-            <div class="security-item reveal">
-                <i class="fas fa-scroll"></i>
-                <div>
-                    <strong>Audit logging</strong>
-                    <span>Sign-ins, failures, and administrative actions are all recorded with timestamps.</span>
-                </div>
-            </div>
 
         </div>
     </div>
@@ -2711,11 +2909,10 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
             <div class="footer-col">
                 <h4>Explore</h4>
                 <ul>
-                    <li><a href="#about">About us</a></li>
+                    <li><button type="button" class="footer-link js-open-about">About us</button></li>
                     <li><a href="#features">Features</a></li>
                     <li><a href="#how">How it works</a></li>
                     <li><a href="#roles">Authorized roles</a></li>
-                    <li><a href="#security">Security</a></li>
                 </ul>
             </div>
 
@@ -2753,7 +2950,6 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
                     </li>
                 </ul>
 
-                <!-- Facebook CTA -->
                 <a class="footer-social"
                    href="https://web.facebook.com/profile.php?id=100063698389605"
                    target="_blank" rel="noopener noreferrer"
@@ -2805,88 +3001,122 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
 
 <script nonce="<?= csp_nonce() ?>">
     /* ============================================================
-       LOGIN MODAL CONTROLLER
-       - Opens when any .js-open-login trigger is clicked
-       - Auto-opens if PHP flagged it (POST with error)
-       - Closes on backdrop click (outside the login-card) or Esc
-       - Focus trap while open
+       GENERIC MODAL CONTROLLER (login + about)
        ============================================================ */
     (function () {
-        const overlay = document.getElementById('loginOverlay');
-        if (!overlay) return;
+        function setupModal(overlayId, opts) {
+            const overlay = document.getElementById(overlayId);
+            if (!overlay) return null;
 
-        const card = overlay.querySelector('.login-card');
-        const autoOpen = overlay.dataset.autoOpen === '1';
+            const dialog = overlay.querySelector(opts.dialogSelector);
+            if (!dialog) return null;
 
-        function openModal() {
-            if (overlay.classList.contains('active')) return;
-            overlay.classList.add('active');
-            overlay.setAttribute('aria-hidden', 'false');
-            document.body.classList.add('modal-open');
-            window.scrollTo({ top: 0, behavior: 'instant' });
+            function open() {
+                if (overlay.classList.contains('active')) return;
+                overlay.classList.add('active');
+                overlay.setAttribute('aria-hidden', 'false');
+                document.body.classList.add('modal-open');
+                window.scrollTo({ top: 0, behavior: 'instant' });
 
-            setTimeout(function () {
-                const first = overlay.querySelector(
-                    'input:not([disabled]), button:not([disabled]), [href]'
-                );
-                if (first) first.focus();
-            }, 380);
-        }
+                setTimeout(function () {
+                    const first = overlay.querySelector(
+                        'input:not([disabled]), button:not([disabled]), [href]'
+                    );
+                    if (first) first.focus();
+                }, 380);
+            }
 
-        function closeModal() {
-            if (!overlay.classList.contains('active')) return;
-            overlay.classList.remove('active');
-            overlay.setAttribute('aria-hidden', 'true');
-            document.body.classList.remove('modal-open');
-        }
+            function close() {
+                if (!overlay.classList.contains('active')) return;
+                overlay.classList.remove('active');
+                overlay.setAttribute('aria-hidden', 'true');
+                document.body.classList.remove('modal-open');
+            }
 
-        if (autoOpen) {
-            requestAnimationFrame(function () {
-                requestAnimationFrame(openModal);
+            // Click-outside-to-close
+            overlay.addEventListener('click', function (e) {
+                if (!dialog.contains(e.target)) close();
             });
+
+            // ESC closes this modal (only if active)
+            document.addEventListener('keydown', function (e) {
+                if (e.key === 'Escape' && overlay.classList.contains('active')) {
+                    close();
+                }
+            });
+
+            // Basic focus trap
+            overlay.addEventListener('keydown', function (e) {
+                if (e.key !== 'Tab') return;
+                const focusables = overlay.querySelectorAll(
+                    'input:not([disabled]), button:not([disabled]), [href], ' +
+                    'select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+                );
+                if (!focusables.length) return;
+
+                const first = focusables[0];
+                const last  = focusables[focusables.length - 1];
+
+                if (e.shiftKey && document.activeElement === first) {
+                    e.preventDefault();
+                    last.focus();
+                } else if (!e.shiftKey && document.activeElement === last) {
+                    e.preventDefault();
+                    first.focus();
+                }
+            });
+
+            return { open: open, close: close, overlay: overlay };
         }
 
-        // Every "Sign In" trigger opens the modal
+        // --- Login modal ---
+        const loginModal = setupModal('loginOverlay', { dialogSelector: '.login-card' });
+
+        if (loginModal) {
+            const autoOpen = loginModal.overlay.dataset.autoOpen === '1';
+            if (autoOpen) {
+                requestAnimationFrame(function () {
+                    requestAnimationFrame(loginModal.open);
+                });
+            }
+        }
+
+        // --- About modal ---
+        const aboutModal = setupModal('aboutOverlay', { dialogSelector: '.about-modal' });
+
+        // Open-login triggers
         document.querySelectorAll('.js-open-login').forEach(function (btn) {
             btn.addEventListener('click', function (e) {
                 e.preventDefault();
-                openModal();
+                if (aboutModal) aboutModal.close();
+                if (loginModal) loginModal.open();
             });
         });
 
-        // Close when the user clicks OUTSIDE the login-card (on the backdrop)
-        overlay.addEventListener('click', function (e) {
-            if (!card.contains(e.target)) {
-                closeModal();
-            }
+        // Open-about triggers
+        document.querySelectorAll('.js-open-about').forEach(function (btn) {
+            btn.addEventListener('click', function (e) {
+                e.preventDefault();
+                if (loginModal) loginModal.close();
+                if (aboutModal) aboutModal.open();
+            });
         });
 
-        // Close with the Escape key
-        document.addEventListener('keydown', function (e) {
-            if (e.key === 'Escape' && overlay.classList.contains('active')) {
-                closeModal();
-            }
+        // Close-about triggers
+        document.querySelectorAll('.js-close-about').forEach(function (btn) {
+            btn.addEventListener('click', function (e) {
+                e.preventDefault();
+                if (aboutModal) aboutModal.close();
+            });
         });
 
-        // Focus trap — keyboard users stay inside the modal while open
-        overlay.addEventListener('keydown', function (e) {
-            if (e.key !== 'Tab') return;
-            const focusables = overlay.querySelectorAll(
-                'input:not([disabled]), button:not([disabled]), [href], ' +
-                'select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-            );
-            if (!focusables.length) return;
-
-            const first = focusables[0];
-            const last  = focusables[focusables.length - 1];
-
-            if (e.shiftKey && document.activeElement === first) {
+        // "Go to Sign In" from About footer
+        document.querySelectorAll('.js-open-login-from-about').forEach(function (btn) {
+            btn.addEventListener('click', function (e) {
                 e.preventDefault();
-                last.focus();
-            } else if (!e.shiftKey && document.activeElement === last) {
-                e.preventDefault();
-                first.focus();
-            }
+                if (aboutModal) aboutModal.close();
+                if (loginModal) loginModal.open();
+            });
         });
     })();
 
@@ -2914,15 +3144,13 @@ $auto_open_login = ($_SERVER['REQUEST_METHOD'] === 'POST' && !$is_locked);
         });
     }
 
-    const LOCK_TOTAL    = <?= (int) $lock_total ?>;   // correct window for the lock that actually fired
-    // Server sends seconds remaining (0 = not locked); the unlock moment is
-    // computed on the browser's own clock, so server/client clock skew can
-    // never disable the form when nobody is locked.
+    /* ============================================================
+       Lock countdown
+       ============================================================ */
+    const LOCK_TOTAL    = <?= (int) $lock_total ?>;
     const LOCK_REMAINING = <?= (int) $lock_remaining ?>;
     const UNLOCK_AT_MS   = LOCK_REMAINING > 0 ? Date.now() + LOCK_REMAINING * 1000 : 0;
-    /* ============================================================
-       Lockout countdown
-       ============================================================ */
+
     function formatLockTime(totalSeconds) {
         if (totalSeconds < 0) totalSeconds = 0;
         const m = Math.floor(totalSeconds / 60);

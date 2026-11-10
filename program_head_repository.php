@@ -35,8 +35,9 @@ try {
 $error = '';
 $success = '';
 
-// Get own department name
-$cacheKey = 'ph_own_dept_' . $phId;
+// FIX #9: cache key must include department_id + deptGone so a reassignment
+// invalidates the entry immediately (old key was only $phId → stale for 1h).
+$cacheKey = 'ph_own_dept_' . $phId . '_' . (int)$ownDeptId . '_' . ($deptGone ? '1' : '0');
 $ownDept = fileCacheGet($cacheKey, 3600);
 if ($ownDept === false && $ownDeptId && !$deptGone) {
     $stmt = $pdo->prepare("SELECT id, department_name FROM departments WHERE id = ?");
@@ -200,7 +201,8 @@ if (isset($_GET['action']) && $_GET['action'] === 'download_folder_zip' && isset
             $filename = $f['title'] ?? ('document_' . $f['id']);
         }
         $filename = basename((string)$filename);
-        $filename = preg_replace('/[\/\\\\:*?"<>|]+/', '_', $filename);
+        // FIX #12: strip null bytes and control chars, use /u for unicode safety.
+        $filename = preg_replace('/[\/\\\\:*?"<>|\x00-\x1F]+/u', '_', $filename);
         $filename = trim($filename);
         if ($filename === '') $filename = 'document_' . (int)$f['id'];
 
@@ -248,6 +250,13 @@ if (isset($_GET['action']) && $_GET['action'] === 'download_folder_zip' && isset
         error_log('[CHED] ph repo ZIP blocked, storage unavailable: ' . get_class($e));
         @unlink($tmpZipPath);
         header('Location: program_head_repository.php?folder=' . $zipFolderId . '&error=' . urlencode('Storage temporarily unavailable. Please try again.'));
+        exit;
+    } catch (Throwable $t) {
+        // FIX #6: catch non-Storage Throwables too, so a fatal mid-loop never leaks
+        // the temp ZIP (finally below only runs for non-exit paths).
+        error_log('[CHED] ph repo ZIP failed: ' . $t->getMessage());
+        @unlink($tmpZipPath);
+        header('Location: program_head_repository.php?folder=' . $zipFolderId . '&error=' . urlencode('Unable to build ZIP archive.'));
         exit;
     } finally {
         foreach ($stagedFiles as $t) {
@@ -312,10 +321,16 @@ function linkRepoForwardToDocuments(PDO $pdo, array $repoItem, int $phId): ?int
     // Approve / reject / archive then move only the copy — the original is never
     // renamed or deleted, so the PH repository entry can never point at a dead path.
     $sourceRel = (string)$repoItem['file_path'];
+    // FIX #3: title/filename are optional in some ph_repository rows — use ?? fallbacks
+    // so no NULL leaks into documents.title / documents.filename.
+    $title    = (string)($repoItem['title'] ?? 'document');
+    $filename = (string)($repoItem['filename'] ?? '') ?: basename($sourceRel);
+    $desc     = (string)($repoItem['description'] ?? '');
+
     $copyRel = copyStoredFile(
         $sourceRel,
         getFileStorageDir('pending_admin', 'ph'),
-        (string)($repoItem['title'] ?? 'document'),
+        $title,
         strtolower(pathinfo($sourceRel, PATHINFO_EXTENSION))
     );
     if ($copyRel === null) {
@@ -328,11 +343,11 @@ function linkRepoForwardToDocuments(PDO $pdo, array $repoItem, int $phId): ?int
     ");
     $stmt->execute([
         $repoItem['department_id'],
-        $repoItem['title'],
-        $repoItem['filename'] ?: basename($sourceRel),
+        $title,
+        $filename,
         $copyRel,
         $phId,
-        $repoItem['description'] ?? '',
+        $desc,
     ]);
     $docId = (int) $pdo->lastInsertId();
     // Hash the copy now so the admin approval-time duplicate check is cheap.
@@ -457,9 +472,52 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     foreach ($children->fetchAll(PDO::FETCH_COLUMN) as $cid) $toDelete[] = (int)$cid;
                 }
                 $placeholders = implode(',', array_fill(0, count($toDelete), '?'));
-                // Soft delete (§12): only repository entries/folders are removed.
-                $pdo->prepare("DELETE FROM ph_repository WHERE folder_id IN ($placeholders) AND program_head_id = ? AND (department_id = ?)")->execute(array_merge($toDelete, [$phId, $deptId]));
-                $pdo->prepare("DELETE FROM ph_repo_folders WHERE id IN ($placeholders)")->execute($toDelete);
+
+                // FIX #1: collect all repo rows first, delete DB rows inside a
+                // transaction, THEN clean up storage for rows that have no other
+                // live reference. Never delete a shared forwarded-copy path.
+                $collectStmt = $pdo->prepare(
+                    "SELECT id, file_path, ph_document_id, document_id
+                       FROM ph_repository
+                      WHERE folder_id IN ($placeholders)
+                        AND program_head_id = ? AND department_id = ?"
+                );
+                $collectStmt->execute(array_merge($toDelete, [$phId, $deptId]));
+                $rowsToDelete = $collectStmt->fetchAll(PDO::FETCH_ASSOC);
+
+                try {
+                    $pdo->beginTransaction();
+                    $pdo->prepare("DELETE FROM ph_repository WHERE folder_id IN ($placeholders)
+                                    AND program_head_id = ? AND department_id = ?")
+                        ->execute(array_merge($toDelete, [$phId, $deptId]));
+                    $pdo->prepare("DELETE FROM ph_repo_folders WHERE id IN ($placeholders)")
+                        ->execute($toDelete);
+                    $pdo->commit();
+                } catch (Throwable $tx) {
+                    if ($pdo->inTransaction()) $pdo->rollBack();
+                    error_log('[CHED] delete_folder failed: ' . $tx->getMessage());
+                    $response['message'] = 'Failed to delete folder. Please retry.';
+                    if ($isAjax) {
+                        header('Content-Type: application/json');
+                        echo json_encode($response);
+                        exit;
+                    }
+                    header('Location: program_head_repository.php?folder=' . ($currentFolderId ?? 0)
+                        . '&error=' . urlencode($response['message']));
+                    exit;
+                }
+
+                // Now safe to remove physical files that no other record owns.
+                foreach ($rowsToDelete as $r) {
+                    if (empty($r['ph_document_id']) && empty($r['document_id']) && !empty($r['file_path'])) {
+                        try {
+                            storageDeleteRel((string)$r['file_path']);
+                        } catch (Throwable $e) {
+                            error_log('[CHED] folder-del orphan left: ' . $r['file_path']);
+                        }
+                    }
+                }
+
                 logAudit($pdo, 'delete_ph_repo_folder', "Deleted folder '{$folder['folder_name']}' (ID {$folderId})", 'ph_repo_folders', $folderId);
                 $response['success'] = true;
                 $response['message'] = "Folder \"{$folder['folder_name']}\" and its contents deleted.";
@@ -486,41 +544,60 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!$repoId) {
             $error = 'Invalid repository entry.';
         } else {
+            // FIX #4/#5: serialize forwards per-repo so a double-click or a race can't
+            // notify every admin twice. Re-fetch inside the lock; 5s debounce.
+            $lockKey = 'forward:repo:' . $repoId;
+            $locked  = acquireUploadLock($pdo, $lockKey);
+            if ($locked) {
+                register_shutdown_function(function () use ($pdo, $lockKey) {
+                    releaseUploadLock($pdo, $lockKey);
+                });
+            }
+
             $repo = $pdo->prepare("SELECT * FROM ph_repository WHERE id = ? AND program_head_id = ? AND (department_id = ?)");
             $repo->execute([$repoId, $phId, $deptId]);
             $repoItem = $repo->fetch();
+
             if (!$repoItem) {
                 $error = 'Entry not found or access denied.';
             } else {
-                // Repository original is protected: forwarding only ever creates an
-                // independent copy (linkRepoForwardToDocuments), never moves the file.
-                $forwarded = true;
-                if (!empty($repoItem['ph_document_id'])) {
-                    transitionDocumentStatus($pdo, 'ph_documents', (int)$repoItem['ph_document_id'], 'pending_admin');
-                } elseif (!empty($repoItem['document_id'])) {
-                    transitionDocumentStatus($pdo, 'documents', (int)$repoItem['document_id'], 'pending_admin');
+                $recentlyForwarded = !empty($repoItem['forwarded_at'])
+                    && (time() - strtotime((string)$repoItem['forwarded_at'])) < 5;
+
+                if ($recentlyForwarded) {
+                    $success = "\"{$repoItem['title']}\" was already forwarded — no duplicate notification sent.";
                 } else {
-                    $forwarded = linkRepoForwardToDocuments($pdo, $repoItem, $phId) !== null;
-                }
-                if (!$forwarded) {
-                    $error = 'Could not forward: the repository file is missing or its copy failed. Re-upload it, then forward again.';
-                } else {
-                    $pdo->prepare("UPDATE ph_repository SET forwarded_to_admin = 1, forwarded_at = NOW() WHERE id = ?")->execute([$repoId]);
-                    $admins = $pdo->query("SELECT id FROM users WHERE role = 'admin'")->fetchAll();
-                    foreach ($admins as $admin) {
-                        createNotification(
-                            $pdo,
-                            $admin['id'],
-                            'Document Forwarded by ' . currentRoleName(),
-                            currentRoleName() . " forwarded: \"{$repoItem['title']}\"",
-                            'info',
-                            null
-                        );
+                    // Repository original is protected: forwarding only ever creates an
+                    // independent copy (linkRepoForwardToDocuments), never moves the file.
+                    $forwarded = true;
+                    if (!empty($repoItem['ph_document_id'])) {
+                        transitionDocumentStatus($pdo, 'ph_documents', (int)$repoItem['ph_document_id'], 'pending_admin');
+                    } elseif (!empty($repoItem['document_id'])) {
+                        transitionDocumentStatus($pdo, 'documents', (int)$repoItem['document_id'], 'pending_admin');
+                    } else {
+                        $forwarded = linkRepoForwardToDocuments($pdo, $repoItem, $phId) !== null;
                     }
-                    logAudit($pdo, 'forward_to_admin', "Forwarded entry #{$repoId}: {$repoItem['title']}", 'ph_repository', $repoId);
-                    $success = "\"{$repoItem['title']}\" forwarded to Admin.";
+                    if (!$forwarded) {
+                        $error = 'Could not forward: the repository file is missing or its copy failed. Re-upload it, then forward again.';
+                    } else {
+                        $pdo->prepare("UPDATE ph_repository SET forwarded_to_admin = 1, forwarded_at = NOW() WHERE id = ?")->execute([$repoId]);
+                        $admins = $pdo->query("SELECT id FROM users WHERE role = 'admin'")->fetchAll();
+                        foreach ($admins as $admin) {
+                            createNotification(
+                                $pdo,
+                                $admin['id'],
+                                'Document Forwarded by ' . currentRoleName(),
+                                currentRoleName() . " forwarded: \"{$repoItem['title']}\"",
+                                'info',
+                                null
+                            );
+                        }
+                        logAudit($pdo, 'forward_to_admin', "Forwarded entry #{$repoId}: {$repoItem['title']}", 'ph_repository', $repoId);
+                        $success = "\"{$repoItem['title']}\" forwarded to Admin.";
+                    }
                 }
             }
+            if ($locked) releaseUploadLock($pdo, $lockKey);
         }
         $redirect = 'program_head_repository.php?folder=' . ($currentFolderId ?? 0);
         if (!empty($success)) $redirect .= '&success=' . urlencode($success);
@@ -573,9 +650,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 exit;
             }
 
+            // FIX #7: verify the row still exists inside the transaction so a
+            // concurrent delete can't be mistaken for a successful move.
             $pdo->beginTransaction();
             try {
-                $pdo->prepare("UPDATE ph_repository SET folder_id = ? WHERE id = ?")->execute([$folderId, $repoId]);
+                $upd = $pdo->prepare(
+                    "UPDATE ph_repository SET folder_id = ?
+                       WHERE id = ? AND program_head_id = ? AND department_id = ?"
+                );
+                $upd->execute([$folderId, $repoId, $phId, $deptId]);
+
+                if ($upd->rowCount() === 0) {
+                    $still = $pdo->prepare("SELECT folder_id FROM ph_repository WHERE id = ?");
+                    $still->execute([$repoId]);
+                    $stillRow = $still->fetch();
+                    if (!$stillRow) {
+                        $pdo->rollBack();
+                        echo json_encode(['success' => false, 'message' => 'File no longer exists.']);
+                        exit;
+                    }
+                    // Row exists but value unchanged (or was concurrently moved to the same target).
+                    $pdo->rollBack();
+                    echo json_encode(['success' => true, 'noop' => true, 'message' => 'File is already in this location.']);
+                    exit;
+                }
+
                 logAudit($pdo, 'move_ph_repo_file', "Moved repo entry #{$repoId} to folder " . ($folderId ?? 'root'), 'ph_repository', $repoId);
                 $pdo->commit();
             } catch (Throwable $tx) {
@@ -770,6 +869,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $error = 'Failed to save uploaded file.';
                 } else {
                     $autoForward = isset($_POST['auto_forward']);
+                    // FIX #2: distinguish "no row yet" (safe to delete staged file) from
+                    // "row exists" (must not orphan) — and catch Throwable, not just PDO.
+                    $newId = null;
+                    $rowInserted = false;
                     try {
                         $ins = $pdo->prepare("INSERT INTO ph_repository (department_id, program_head_id, folder_id, title, filename, file_path, description, forwarded_to_admin, forwarded_at, created_at, file_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?)");
                         $ins->execute([
@@ -785,12 +888,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             $repoHash ?? null
                         ]);
                         $newId = (int)$pdo->lastInsertId();
+                        $rowInserted = true;
+
                         finalizeStorageFilename($pdo, $newId, 'ph_repository', $title, $ext);
                         $freshPath = $pdo->prepare("SELECT file_path, filename FROM ph_repository WHERE id = ?");
                         $freshPath->execute([$newId]);
                         $fresh = $freshPath->fetch() ?: ['file_path' => $filePath, 'filename' => basename($file['name'])];
                         $filePath = $fresh['file_path'];
                         logAudit($pdo, 'create_ph_repo_upload', "Uploaded document '$title' (ID $newId)", 'ph_repository', $newId);
+
                         if ($autoForward) {
                             $docId = linkRepoForwardToDocuments($pdo, [
                                 'id' => $newId,
@@ -805,19 +911,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 foreach ($admins as $admin) {
                                     createNotification($pdo, $admin['id'], 'Document Forwarded by ' . currentRoleName(), currentRoleName() . " forwarded: \"$title\"", 'info', null);
                                 }
+                                $success = "Document uploaded and forwarded to Admin for review.";
                             } else {
                                 $pdo->prepare("UPDATE ph_repository SET forwarded_to_admin = 0, forwarded_at = NULL WHERE id = ?")->execute([$newId]);
+                                $success = "Document uploaded, but forwarding failed — use Forward on the entry to retry.";
                             }
+                        } else {
+                            $success = "Document uploaded successfully.";
                         }
-                        $success = $autoForward
-                            ? ($docId ?? null) !== null
-                                ? "Document uploaded and forwarded to Admin for review."
-                                : "Document uploaded, but forwarding failed — use Forward on the entry to retry."
-                            : "Document uploaded successfully.";
-                    } catch (PDOException $e) {
-                        storageDeleteRel($allocatedKey);
-                        error_log('[CHED] repo_upload failed: ' . $e->getMessage());
-                        $error = 'Failed to save upload.';
+                    } catch (Throwable $e) {
+                        error_log('[CHED] repo_upload error (rowInserted=' . ($rowInserted ? '1' : '0') . ', id=' . ($newId ?? 'null') . '): ' . $e->getMessage());
+                        if (!$rowInserted) {
+                            // Nothing persisted — safe to remove the staged object.
+                            try { storageDeleteRel($allocatedKey); } catch (Throwable $ignored) {}
+                            $error = 'Failed to save upload. Please try again.';
+                        } else {
+                            // Row is in the DB — never delete the file; user can retry Forward.
+                            $error = 'Upload saved, but finalization failed. Use Forward on the entry to retry, or delete and re-upload.';
+                        }
                     }
                 }
             }
@@ -834,11 +945,42 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $repoId = (int)($_POST['repo_id'] ?? 0);
         $isAjax = !empty($_POST['ajax']);
         $response = ['success' => false, 'message' => ''];
+
         $repo = $pdo->prepare("SELECT * FROM ph_repository WHERE id = ? AND program_head_id = ? AND (department_id = ?)");
         $repo->execute([$repoId, $phId, $deptId]);
         $repoItem = $repo->fetch();
+
         if ($repoItem) {
-            $pdo->prepare("DELETE FROM ph_repository WHERE id = ?")->execute([$repoId]);
+            // FIX #1: only delete the physical file if nothing else references it.
+            // ph_document_id / document_id imply the same path is still linked to
+            // an admin submission — never delete those.
+            $safeToDeleteFile =
+                empty($repoItem['ph_document_id']) &&
+                empty($repoItem['document_id']) &&
+                !empty($repoItem['file_path']);
+
+            try {
+                $pdo->beginTransaction();
+                $pdo->prepare("DELETE FROM ph_repository WHERE id = ?")->execute([$repoId]);
+                $pdo->commit();
+            } catch (Throwable $tx) {
+                if ($pdo->inTransaction()) $pdo->rollBack();
+                error_log('[CHED] delete_repo failed: ' . $tx->getMessage());
+                $response['message'] = 'Failed to delete entry. Please retry.';
+                if ($isAjax) { header('Content-Type: application/json'); echo json_encode($response); exit; }
+                header('Location: program_head_repository.php?folder=' . ($currentFolderId ?? 0)
+                    . '&error=' . urlencode($response['message']));
+                exit;
+            }
+
+            if ($safeToDeleteFile) {
+                try {
+                    storageDeleteRel((string)$repoItem['file_path']);
+                } catch (Throwable $e) {
+                    error_log('[CHED] orphan file left after delete_repo: ' . $repoItem['file_path']);
+                }
+            }
+
             logAudit($pdo, 'delete_ph_repository', "Removed entry #{$repoId}", 'ph_repository', $repoId);
             $response['success'] = true;
             $response['message'] = 'Document removed from repository.';
@@ -1102,21 +1244,35 @@ body {
 }
 
 /* ═══ Explorer container ═══════════════════════════════════ */
+/* FIX #13: full-bleed — no max-width cap, no centering, no card chrome,
+   so the content-panel spans the entire page. */
 .explorer-container {
     flex: 1;
     background: var(--white);
-    border-radius: var(--radius-lg);
-    border: 1px solid var(--border);
-    box-shadow: var(--shadow-lg);
     overflow: hidden;
     min-height: 0;
     display: flex;
     flex-direction: column;
     width: 100%;
-    max-width: 1500px;
-    margin: 0 auto;
+    max-width: none;
+    margin: 0;
     position: relative;
 }
+
+/* FIX #13: make sure the outer wrapper also stretches edge-to-edge.
+   If includes/header.php already defines .dashboard-container with a
+   max-width or padding, this block overrides those. */
+.dashboard-container {
+    width: 100%;
+    max-width: none;
+    margin: 0;
+    padding: 0;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
 .content-panel {
     padding: 0;
     overflow-y: auto;
@@ -1322,6 +1478,31 @@ body {
         0 4px 14px -4px rgba(53,99,233,.55);
 }
 .btn-primary:active { transform: translateY(0); }
+
+/* ── Button loading state (folder create + file upload) ── */
+@keyframes btnSpin {
+    to { transform: rotate(360deg); }
+}
+.btn-spinner {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border: 2px solid currentColor;
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: btnSpin 0.6s linear infinite;
+    flex-shrink: 0;
+}
+.btn-spinner[hidden] { display: none; }
+.btn.is-loading {
+    opacity: 0.85;
+    cursor: not-allowed;
+    pointer-events: none;
+}
+.btn.is-loading:hover {
+    transform: none;
+    box-shadow: var(--shadow-xs);
+}
 
 .btn-secondary {
     background: var(--white);
@@ -1910,9 +2091,9 @@ body {
 @media (max-width: 1100px) {
     .content-panel .toolbar .search-section input { max-width: 190px; }
 }
-@media (max-width: 900px) {
-    .explorer-container { max-width: none; border-radius: var(--radius-md); }
-}
+/* FIX #13: previous @media (max-width: 900px) block added border-radius to
+   .explorer-container — removed, because the panel is now full-bleed at every
+   viewport width. */
 @media (max-width: 768px) {
     .content-panel .toolbar .search-section input { max-width: 100%; }
     .content-panel .toolbar .search-section { flex: 1; }
@@ -1938,6 +2119,7 @@ body {
         animation-iteration-count: 1 !important;
         transition-duration: .01ms !important;
     }
+    .btn-spinner { animation: none !important; }
 }
 </style>
 <?php
@@ -2096,13 +2278,15 @@ include 'includes/header.php';
                                                 $viewId = (int)$item['document_id'];
                                             }
                                         ?>
-                                        <button type="button" class="btn-icon view-btn" title="View" aria-label="View <?= $viewTitle ?>"
-                                            data-id="<?= $viewId ?>"
-                                            data-type="<?= $viewSource ?>"
-                                            data-title="<?= $viewTitle ?>"
-                                            data-extension="<?= htmlspecialchars($viewExt) ?>">
-                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-                                        </button>
+                                        <?php if ($fileExists): /* FIX #10: never render a view button for a missing file */ ?>
+                                            <button type="button" class="btn-icon view-btn" title="View" aria-label="View <?= $viewTitle ?>"
+                                                data-id="<?= $viewId ?>"
+                                                data-type="<?= $viewSource ?>"
+                                                data-title="<?= $viewTitle ?>"
+                                                data-extension="<?= htmlspecialchars($viewExt) ?>">
+                                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                                            </button>
+                                        <?php endif; ?>
                                         <a href="?action=download&repo_id=<?= $item['id'] ?>" class="btn-icon" title="Download" aria-label="Download <?= htmlspecialchars($title) ?>" style="text-decoration:none;">
                                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                                         </a>
@@ -2147,7 +2331,10 @@ include 'includes/header.php';
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary" data-csp-action="closeFolderModal">Cancel</button>
-                <button type="submit" class="btn btn-primary">Create Folder</button>
+                <button type="submit" class="btn btn-primary" id="createFolderBtn">
+                    <span class="btn-spinner" id="createFolderBtnSpinner" hidden aria-hidden="true"></span>
+                    <span id="createFolderBtnText">Create Folder</span>
+                </button>
             </div>
         </form>
     </div>
@@ -2198,12 +2385,15 @@ include 'includes/header.php';
                 </div>
                 <div class="form-group">
                     <label for="uploadFile" class="required">Select File</label>
-                    <input type="file" name="upload_file" id="uploadFile" class="form-control" required accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.jpg,.jpeg,.png,.gif,.webp,.svg">
+                    <input type="file" name="upload_file" id="uploadFile" class="form-control" required accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.jpg,.jpeg,.png,.gif,.webp">
                 </div>
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary" data-csp-action="closeUploadModal">Cancel</button>
-                <button type="submit" class="btn btn-primary">Upload</button>
+                <button type="submit" class="btn btn-primary" id="uploadSubmitBtn">
+                    <span class="btn-spinner" id="uploadSubmitBtnSpinner" hidden aria-hidden="true"></span>
+                    <span id="uploadSubmitBtnText">Upload</span>
+                </button>
             </div>
         </form>
     </div>
@@ -2259,7 +2449,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     /* ── Toast helper ───────────────────────────────────── */
-    const toastHost = document.createElement('div');
+    // FIX #11: removed dead `toastHost` element.
     function showToast(msg, isErr) {
         const t = document.createElement('div');
         t.className = 'drag-move-toast';
@@ -2269,6 +2459,53 @@ document.addEventListener('DOMContentLoaded', function() {
         setTimeout(() => t.remove(), 2500);
     }
     window.__explorerShowToast = showToast;
+
+    /* ══════════════════════════════════════════════════════
+       Form loading indicator — Create Folder + Upload File
+       These are native POST → redirect forms, so the spinner
+       must persist through the navigation. pageshow resets it
+       when the browser returns (Back button, or nav cancelled).
+       ══════════════════════════════════════════════════════ */
+    function attachFormLoading(formSelector, btnId, textId, spinnerId, loadingLabel) {
+        const form = document.querySelector(formSelector);
+        if (!form) return;
+        const btn     = document.getElementById(btnId);
+        const textEl  = document.getElementById(textId);
+        const spinner = document.getElementById(spinnerId);
+        if (!btn || !textEl || !spinner) return;
+
+        const originalLabel = textEl.textContent;
+
+        // Reset on every page show — covers Back-button return and cancelled nav.
+        window.addEventListener('pageshow', function () {
+            textEl.textContent = originalLabel;
+            spinner.hidden = true;
+            btn.disabled = false;
+            btn.classList.remove('is-loading');
+        });
+
+        form.addEventListener('submit', function (e) {
+            // Guard against a second submit while one is in flight.
+            if (btn.disabled) { e.preventDefault(); return; }
+
+            // Let the browser's native validation run first (required inputs
+            // etc.) — only enter the loading state if the form is valid.
+            if (typeof form.checkValidity === 'function' && !form.checkValidity()) {
+                return; // browser will show its own validation UI
+            }
+
+            // Enter the loading state, then allow native submit to proceed.
+            textEl.textContent = loadingLabel;
+            spinner.hidden = false;
+            btn.disabled = true;
+            btn.classList.add('is-loading');
+            // Do NOT preventDefault — the form posts and the server redirect
+            // carries the user to the success/error page as before.
+        });
+    }
+
+    attachFormLoading('#folderModal form', 'createFolderBtn', 'createFolderBtnText', 'createFolderBtnSpinner', 'Creating…');
+    attachFormLoading('#uploadModal form', 'uploadSubmitBtn', 'uploadSubmitBtnText', 'uploadSubmitBtnSpinner', 'Uploading…');
 
     /* ── Confirm modal ──────────────────────────────────── */
     function openDeleteConfirmModal(msg, confirmLabel, mode, callback) {
@@ -2814,7 +3051,3 @@ function closeUploadModal() {
 </script>
 
 <?php include 'includes/footer.php'; ?>
-
-
-
-

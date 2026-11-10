@@ -3,10 +3,6 @@ define('CHED_APP', true);
 require_once 'config.php';
 require_once 'includes/avatar_helpers.php';
 requireAdmin();
-if (superadmin()) {
-    header('Location: super_admin_settings.php');
-    exit;
-}
 
 $error = '';
 $success = '';

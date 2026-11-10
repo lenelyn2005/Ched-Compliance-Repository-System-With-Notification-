@@ -49,7 +49,7 @@ function csp_enforced(): bool
 function csp_directives(): array
 {
     $nonce = csp_nonce();
-    $wsHost = getenv('WS_HOST') ?: 'localhost';
+    $wsHost = getenv('WS_HOST') ?: '127.0.0.1';
     $wsPort = (getenv('WS_PORT') ?: '8080');
     // shortcut: allows both schemes for configured endpoint; upgrade when endpoint is HTTPS-only.
     $wsDev = 'ws://' . $wsHost . ':' . $wsPort;

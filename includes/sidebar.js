@@ -125,8 +125,6 @@ document.addEventListener('DOMContentLoaded', function () {
       e.stopPropagation();
       const isOpen = userMenuWrap.classList.toggle('open');
       userMenuBtn.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
-      const nd = document.getElementById('notifDropdown');
-      if (nd) nd.classList.remove('show');
     });
 
     document.addEventListener('click', function (e) {
@@ -145,87 +143,48 @@ document.addEventListener('DOMContentLoaded', function () {
     });
   }
 
+  // --- Logout confirmation (shared by all roles) ---
+  // The logout link only opens the modal; the POST happens from the modal form.
+  const logoutModal  = document.getElementById('logoutConfirmModal');
+  const logoutForm   = document.getElementById('logoutConfirmForm');
+  const logoutCancel = document.getElementById('logoutCancelBtn');
+  let lastLogoutTrigger = null;
+
+  function closeLogoutModal() {
+    if (!logoutModal) return;
+    logoutModal.classList.remove('show');
+    logoutModal.setAttribute('aria-hidden', 'true');
+    if (lastLogoutTrigger && document.contains(lastLogoutTrigger)) lastLogoutTrigger.focus();
+    lastLogoutTrigger = null;
+  }
+
   document.addEventListener('click', function (e) {
     const a = e.target.closest('a[href="logout.php"]');
-    if (!a) return;
+    if (!a || !logoutModal || !logoutForm) return;
     e.preventDefault();
-    const csrfMeta = document.querySelector('meta[name="csrf-token"]');
-    const f = document.createElement('form');
-    f.method = 'POST';
-    f.action = 'logout.php';
-    const i = document.createElement('input');
-    i.type = 'hidden';
-    i.name = 'csrf_token';
-    i.value = csrfMeta ? csrfMeta.content : '';
-    f.appendChild(i);
-    document.body.appendChild(f);
-    f.submit();
+    if (logoutModal.classList.contains('show')) return; // ignore repeat clicks
+    lastLogoutTrigger = a;
+    logoutModal.classList.add('show');
+    logoutModal.setAttribute('aria-hidden', 'false');
+    (logoutCancel || logoutForm.querySelector('button')).focus();
   });
 
-  // --- Notification dropdown ---
-  const notifBtn = document.getElementById('notifBtn');
-  const notifDropdown = document.getElementById('notifDropdown');
+  if (logoutModal && logoutForm) {
+    if (logoutCancel) logoutCancel.addEventListener('click', closeLogoutModal);
 
-  if (notifBtn && notifDropdown) {
-    notifBtn.addEventListener('click', function (e) {
-      e.stopPropagation();
-      notifDropdown.classList.toggle('show');
-      const pd = document.getElementById('profileDropdown');
-      if (pd) pd.classList.remove('show');
-      const umb = document.getElementById('userMenuBtn');
-      if (umb) {
-        umb.classList.remove('is-open');
-        umb.setAttribute('aria-expanded', 'false');
-      }
-      if (userMenuWrap) {
-        userMenuWrap.classList.remove('open');
-        if (userMenuBtn) userMenuBtn.setAttribute('aria-expanded', 'false');
-      }
-      if (notifDropdown.classList.contains('show')) {
-        const csrfMeta = document.querySelector('meta[name="csrf-token"]');
-        fetch('mark_notifications_read.php', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Requested-With': 'XMLHttpRequest' },
-          body: 'csrf_token=' + encodeURIComponent(csrfMeta ? csrfMeta.content : '')
-        })
-          .then(() => {
-            const badge = document.getElementById('notifCountBadge');
-            if (badge) badge.style.display = 'none';
-          })
-          .catch(() => {});
-      }
+    // Backdrop clicks and Cancel only dismiss; they never submit the form.
+    logoutModal.addEventListener('click', function (e) {
+      if (e.target === logoutModal) closeLogoutModal();
+    });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && logoutModal.classList.contains('show')) closeLogoutModal();
     });
 
-    document.addEventListener('click', function (e) {
-      if (!notifDropdown.contains(e.target) && !notifBtn.contains(e.target)) {
-        notifDropdown.classList.remove('show');
-      }
+    // Guard against double submissions.
+    logoutForm.addEventListener('submit', function () {
+      const btn = document.getElementById('logoutConfirmBtn');
+      if (btn) { btn.disabled = true; btn.textContent = 'Logging out…'; }
     });
-
-    let lastNotifId = 0;
-    const firstItem = notifDropdown.querySelector('.notif-item[data-notification-id]');
-    if (firstItem) {
-      lastNotifId = parseInt(firstItem.getAttribute('data-notification-id'), 10) || 0;
-    }
-
-    function escapeHtml(text) {
-      const div = document.createElement('div');
-      div.textContent = text == null ? '' : String(text);
-      return div.innerHTML;
-    }
-
-    function timeAgoFromTimestamp(timestamp) {
-      const now = Math.floor(Date.now() / 1000);
-      const diff = now - timestamp;
-      if (diff < 60) return 'Just now';
-      if (diff < 3600) return Math.floor(diff / 60) + ' minutes ago';
-      if (diff < 86400) return Math.floor(diff / 3600) + ' hours ago';
-      if (diff < 2592000) return Math.floor(diff / 86400) + ' days ago';
-      return Math.floor(diff / 2592000) + ' months ago';
-    }
-
-    // shortcut: notification polling removed; real-time handled by websocket_client.js.
-    // Existing dropdown UI preserved; WebSocket events update badge and prepend items.
   }
 
   // --- Data-confirm links ---

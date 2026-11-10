@@ -506,6 +506,7 @@ include 'includes/header.php';
             <?= csrfField() ?>
             <input type="hidden" name="action" value="delete">
             <input type="hidden" name="id" id="umdDeleteDeptId" value="<?= $deleteModalTarget ? (int)$deleteModalTarget['id'] : '' ?>">
+            <input type="text" name="username" autocomplete="username" value="<?= sanitize($_SESSION['user_name'] ?? '') ?>" style="display:none" tabindex="-1" aria-hidden="true">
             <div class="umd-modal-body">
                 <p>You are about to <strong>permanently delete</strong> this department. This cannot be undone.</p>
                 <?php if ($deleteModalError): ?>

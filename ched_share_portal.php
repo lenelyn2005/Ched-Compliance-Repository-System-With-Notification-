@@ -29,12 +29,12 @@ function deny_share(int $httpCode, string $message, string $title = 'Access Deni
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'Inter',system-ui,-apple-system,sans-serif;background:#f6f1e8;min-height:100vh;
+body{font-family:'Inter',system-ui,-apple-system,sans-serif;background:#f1f5f9;min-height:100vh;
 display:flex;align-items:center;justify-content:center;color:#0f1720;padding:16px;
-background-image:radial-gradient(800px 500px at 100% 0%,rgba(37,99,235,.08),transparent 60%),
-radial-gradient(700px 500px at -10% 30%,rgba(245,158,11,.09),transparent 60%)}
-.card{max-width:520px;background:#fffefb;border:1px solid #e6ddcc;border-radius:22px;
-box-shadow:0 30px 80px -20px rgba(15,23,32,.25),0 8px 20px -8px rgba(15,23,32,.12);padding:40px 40px}
+background-image:radial-gradient(800px 500px at 100% 0%,rgba(37,99,235,.06),transparent 60%),
+radial-gradient(700px 500px at -10% 30%,rgba(59,130,246,.05),transparent 60%)}
+.card{max-width:520px;background:#ffffff;border:1px solid #e2e8f0;border-radius:22px;
+box-shadow:0 30px 80px -20px rgba(15,23,32,.18),0 8px 20px -8px rgba(15,23,32,.08);padding:40px 40px}
 .icon{width:56px;height:56px;border-radius:16px;background:linear-gradient(135deg,#fee2e2,#fecaca);color:#dc2626;
 display:inline-flex;align-items:center;justify-content:center;margin-bottom:20px;font-size:26px;
 box-shadow:0 10px 24px -8px rgba(220,38,38,.35)}
@@ -317,53 +317,6 @@ function build_breadcrumb(PDO $pdo, int $deptId, int $folderId): array
 }
 
 
-/* =============================================================
-   NEW: recent documents across scope (for home dashboard)
-   ============================================================= */
-function fetch_recent_documents(PDO $pdo, ?int $scopeDeptId, int $limit = 8): array
-{
-    $results = [];
-
-    $sql = "SELECT d.id, d.filename, d.title, d.department_id, d.upload_date,
-                   'document' AS source
-            FROM documents d
-            WHERE d.status = 'approved_admin' AND d.archived = 0";
-    $params = [];
-    if ($scopeDeptId !== null) { $sql .= " AND d.department_id = ?"; $params[] = $scopeDeptId; }
-    $sql .= " ORDER BY d.upload_date DESC LIMIT " . (int)$limit;
-    $stmt = $pdo->prepare($sql);
-    $stmt->execute($params);
-    $results = $stmt->fetchAll();
-
-    $sql = "SELECT pd.id, pd.filename, pd.title, pd.department_id, pd.upload_date,
-                   'ph_document' AS source
-            FROM ph_documents pd
-            WHERE pd.status = 'approved_admin' AND pd.archived = 0";
-    $params = [];
-    if ($scopeDeptId !== null) { $sql .= " AND pd.department_id = ?"; $params[] = $scopeDeptId; }
-    $sql .= " ORDER BY pd.upload_date DESC LIMIT " . (int)$limit;
-    $stmt = $pdo->prepare($sql);
-    $stmt->execute($params);
-    $results = array_merge($results, $stmt->fetchAll());
-
-    usort($results, static fn($a, $b) => strcmp((string)$b['upload_date'], (string)$a['upload_date']));
-    $results = array_slice($results, 0, $limit);
-
-    $deptCache = [];
-    foreach ($results as &$r) {
-        $did = (int)$r['department_id'];
-        if (!isset($deptCache[$did])) {
-            $s = $pdo->prepare("SELECT department_name FROM departments WHERE id = ? LIMIT 1");
-            $s->execute([$did]);
-            $deptCache[$did] = (string)($s->fetchColumn() ?: '');
-        }
-        $r['dept_name'] = $deptCache[$did];
-    }
-    unset($r);
-    return $results;
-}
-
-
 /* =============================================================================
    Global search
    ============================================================================= */
@@ -379,7 +332,6 @@ function search_shared_documents(PDO $pdo, ?int $scopeDeptId, string $query, int
     $results = [];
     $seen    = [];
 
-    // ---- documents table ----
     $sql = "SELECT d.id, d.filename, d.title, d.department_id, d.folder_id, 'document' AS source
             FROM documents d
             WHERE d.status = 'approved_admin'
@@ -397,7 +349,6 @@ function search_shared_documents(PDO $pdo, ?int $scopeDeptId, string $query, int
         $results[] = $row;
     }
 
-    // ---- ph_documents table ----
     $sql = "SELECT pd.id, pd.filename, pd.title, pd.department_id, NULL AS folder_id, 'ph_document' AS source
             FROM ph_documents pd
             WHERE pd.status = 'approved_admin'
@@ -415,7 +366,6 @@ function search_shared_documents(PDO $pdo, ?int $scopeDeptId, string $query, int
         $results[] = $row;
     }
 
-    // Enrich with department name + folder path
     $deptCache = [];
     $folderCache = [];
     foreach ($results as &$r) {
@@ -486,15 +436,6 @@ function icon_doc_v2(int $size = 22): string
          .   '<polyline points="14 2 14 8 20 8"/>'
          .   '<line x1="8" y1="13" x2="16" y2="13"/>'
          .   '<line x1="8" y1="17" x2="13" y2="17"/>'
-         . '</svg>';
-}
-
-function icon_eye(int $size = 14): string
-{
-    return '<svg width="' . $size . '" height="' . $size . '" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
-         . 'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
-         .   '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>'
-         .   '<circle cx="12" cy="12" r="3"/>'
          . '</svg>';
 }
 
@@ -577,16 +518,6 @@ function icon_lock(int $size = 13): string
          . '</svg>';
 }
 
-function icon_print(int $size = 13): string
-{
-    return '<svg width="' . $size . '" height="' . $size . '" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
-         . 'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
-         .   '<polyline points="6 9 6 2 18 2 18 9"/>'
-         .   '<path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/>'
-         .   '<rect x="6" y="14" width="12" height="8"/>'
-         . '</svg>';
-}
-
 /* =============================================================================
    Rendering
    ============================================================================= */
@@ -609,7 +540,6 @@ function render_doc_card(array $doc, string $rawToken, bool $isDirectUploadGroup
     $ext     = strtolower(pathinfo((string)($doc['filename'] ?? ''), PATHINFO_EXTENSION));
     $tq      = htmlspecialchars($rawToken, ENT_QUOTES, 'UTF-8');
     $nameEsc = htmlspecialchars($displayName, ENT_QUOTES, 'UTF-8');
-    $extEsc  = htmlspecialchars($ext, ENT_QUOTES, 'UTF-8');
     $srcEnc  = urlencode($source);
 
     $size = '';
@@ -635,8 +565,13 @@ function render_doc_card(array $doc, string $rawToken, bool $isDirectUploadGroup
         $iconSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" aria-hidden="true"><path d="M10 2h20l10 10v34a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z" fill="#ffc107"/><path d="M30 2l10 10h-8a2 2 0 0 1-2-2V2z" fill="#e0a800"/><rect x="20" y="16" width="8" height="2" fill="#5d4037"/><rect x="20" y="20" width="8" height="2" fill="#5d4037"/><rect x="20" y="24" width="8" height="2" fill="#5d4037"/><rect x="20" y="28" width="8" height="2" fill="#5d4037"/><rect x="20" y="32" width="8" height="6" rx="1" fill="#5d4037"/></svg>';
     }
 
-    return '<div class="doc-card" role="group" aria-label="' . $nameEsc . '" data-name="' . htmlspecialchars(strtolower($displayName), ENT_QUOTES, 'UTF-8') . '">'
-         .   '<div class="doc-card-icon">' . $iconSvg . '<span class="doc-card-verified" aria-label="Verified document">' . icon_check(8) . '</span></div>'
+    return '<div class="doc-card"'
+         .   ' data-doc-id="' . $docId . '"'
+         .   ' data-source="' . $srcEnc . '"'
+         .   ' role="group"'
+         .   ' aria-label="' . $nameEsc . '"'
+         .   ' data-name="' . htmlspecialchars(strtolower($displayName), ENT_QUOTES, 'UTF-8') . '">'
+         .   '<div class="doc-card-icon">' . $iconSvg . '</div>'
          .   '<div class="doc-card-body">'
          .     '<div class="doc-card-name" title="' . $nameEsc . '">' . $nameEsc . '</div>'
          .     '<div class="doc-card-meta">'
@@ -645,15 +580,9 @@ function render_doc_card(array $doc, string $rawToken, bool $isDirectUploadGroup
          .     '</div>'
          .   '</div>'
          .   '<div class="doc-card-actions">'
-         .     '<button type="button" class="dc-btn dc-btn-preview js-view-doc"'
-         .       ' data-doc-id="' . $docId . '"'
-         .       ' data-source="' . $srcEnc . '"'
-         .       ' data-filename="' . $nameEsc . '"'
-         .       ' data-ext="' . $extEsc . '"'
-         .       ' aria-label="Preview ' . $nameEsc . '">' . icon_eye(12) . '</button>'
-         .     '<a class="dc-btn dc-btn-download"'
+         .     '<a class="dc-btn-download"'
          .       ' href="?t=' . $tq . '&amp;action=download&amp;type=' . $srcEnc . '&amp;doc=' . $docId . '"'
-         .       ' aria-label="Download ' . $nameEsc . '">' . icon_download(12) . '</a>'
+         .       ' aria-label="Download ' . $nameEsc . '">' . icon_download(14) . '</a>'
          .   '</div>'
          . '</div>';
 }
@@ -966,8 +895,8 @@ if ($action === 'search') {
     exit;
 }
 
-/* ---------- 4b. Preview / download ---------- */
-if ($action === 'preview' || $action === 'download') {
+/* ---------- 4b. Download (preview disabled) ---------- */
+if ($action === 'download') {
     $docId = (int)($_GET['doc'] ?? 0);
     $type  = ($_GET['type'] ?? 'document') === 'ph_document' ? 'ph_document' : 'document';
 
@@ -1009,7 +938,7 @@ if ($action === 'preview' || $action === 'download') {
     header('Content-Type: ' . $mime);
     header('Content-Length: ' . filesize($staged));
     header(
-        'Content-Disposition: ' . ($action === 'preview' ? 'inline' : 'attachment')
+        'Content-Disposition: attachment'
         . '; filename="' . addcslashes($ascii, '"\\') . '"'
         . "; filename*=UTF-8''" . rawurlencode($safe)
     );
@@ -1173,18 +1102,36 @@ if ($viewDept !== null) {
 $deptCards    = [];
 $totalInScope = 0;
 if ($viewDept === null) {
+    $lastUploadByDept = [];
+    try {
+        $lastStmt = $pdo->query("
+            SELECT department_id, MAX(upload_date) AS last_date FROM (
+                SELECT department_id, upload_date FROM documents
+                 WHERE status = 'approved_admin' AND archived = 0
+                UNION ALL
+                SELECT department_id, upload_date FROM ph_documents
+                 WHERE status = 'approved_admin' AND archived = 0
+            ) t
+            GROUP BY department_id
+        ");
+        foreach ($lastStmt->fetchAll() as $row) {
+            $lastUploadByDept[(int)$row['department_id']] = (string)$row['last_date'];
+        }
+    } catch (Throwable $e) { /* non-fatal */ }
+
     foreach ($departments as $d) {
         $seen  = [];
         $tree  = build_tree_node($pdo, (int)$d['id'], null, $seen);
         $count = count_node_docs($tree);
         if ($count === 0) continue;
-        $deptCards[]   = ['dept' => $d, 'count' => $count];
+        $deptCards[]   = [
+            'dept'      => $d,
+            'count'     => $count,
+            'last_date' => $lastUploadByDept[(int)$d['id']] ?? null,
+        ];
         $totalInScope += $count;
     }
 }
-
-/* NEW: recent uploads on home */
-$recentDocs = ($viewDept === null) ? fetch_recent_documents($pdo, $scopeDeptId, 8) : [];
 
 $slotsRaw   = $link['max_visitors'] === null
     ? null
@@ -1210,10 +1157,10 @@ $totalDocs = $viewDept === null ? $totalInScope : $viewCount;
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
-  --cream:#f6f1e8;
-  --cream-2:#efe9de;
-  --paper:#fffefb;
-  --paper-2:#faf7f0;
+  --cream:#f1f5f9;
+  --cream-2:#e2e8f0;
+  --paper:#ffffff;
+  --paper-2:#f8fafc;
   --ink:#0f1720;
   --ink-2:#2c3742;
   --ink-3:#5e6b7a;
@@ -1225,8 +1172,8 @@ $totalDocs = $viewDept === null ? $totalInScope : $viewCount;
   --blue-glow:rgba(37,99,235,.22);
   --accent:#f59e0b;
   --accent-2:#ea580c;
-  --line:#e6ddcc;
-  --line-2:#d8cdb6;
+  --line:#e2e8f0;
+  --line-2:#cbd5e1;
   --success:#059669;
   --success-bg:rgba(5,150,105,.09);
   --success-line:rgba(5,150,105,.22);
@@ -1234,9 +1181,9 @@ $totalDocs = $viewDept === null ? $totalInScope : $viewCount;
   --radius:12px;
   --radius-lg:22px;
   --shadow-sm:0 1px 2px rgba(15,23,32,.04), 0 1px 3px rgba(15,23,32,.06);
-  --shadow:0 8px 24px -10px rgba(15,23,32,.18), 0 2px 6px -2px rgba(15,23,32,.08);
-  --shadow-lg:0 24px 60px -20px rgba(15,23,32,.35), 0 8px 20px -8px rgba(15,23,32,.15);
-  --shadow-glow:0 0 0 1px rgba(37,99,235,.08), 0 20px 60px -25px rgba(37,99,235,.4);
+  --shadow:0 8px 24px -10px rgba(15,23,32,.16), 0 2px 6px -2px rgba(15,23,32,.06);
+  --shadow-lg:0 24px 60px -20px rgba(15,23,32,.28), 0 8px 20px -8px rgba(15,23,32,.12);
+  --shadow-glow:0 0 0 1px rgba(37,99,235,.08), 0 20px 60px -25px rgba(37,99,235,.35);
   --ease:cubic-bezier(.22,1,.36,1);
   --ease-spring:cubic-bezier(.34,1.56,.64,1);
 }
@@ -1255,13 +1202,13 @@ body{
 body::before{
   content:'';position:fixed;inset:0;pointer-events:none;z-index:0;
   background:
-    radial-gradient(900px 600px at 100% 0%, rgba(37,99,235,.08), transparent 60%),
-    radial-gradient(700px 500px at -10% 30%, rgba(245,158,11,.09), transparent 60%),
-    radial-gradient(800px 600px at 50% 120%, rgba(15,23,32,.05), transparent 60%);
+    radial-gradient(900px 600px at 100% 0%, rgba(37,99,235,.06), transparent 60%),
+    radial-gradient(700px 500px at -10% 30%, rgba(59,130,246,.05), transparent 60%),
+    radial-gradient(800px 600px at 50% 120%, rgba(15,23,32,.03), transparent 60%);
 }
 body::after{
   content:'';position:fixed;inset:0;pointer-events:none;z-index:0;
-  background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.035'/%3E%3C/svg%3E");
+  background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.025'/%3E%3C/svg%3E");
 }
 .app{min-height:100vh;position:relative;z-index:1}
 .main{display:flex;flex-direction:column}
@@ -1291,7 +1238,7 @@ body::after{
 /* TOPBAR */
 .topbar{
   position:sticky;top:0;z-index:60;
-  background:linear-gradient(180deg,rgba(246,241,232,.94),rgba(246,241,232,.80));
+  background:linear-gradient(180deg,rgba(241,245,249,.94),rgba(241,245,249,.80));
   backdrop-filter:blur(20px) saturate(180%);
   -webkit-backdrop-filter:blur(20px) saturate(180%);
   border-bottom:1px solid rgba(15,23,32,.06);
@@ -1371,7 +1318,7 @@ body::after{
   padding:8px 14px;border-radius:11px;
   font-size:.82rem;color:var(--ink-3);
   transition:all .18s var(--ease);
-  min-width:230px;
+  min-width:260px;
 }
 .search-box:focus-within{
   border-color:var(--blue);
@@ -1386,16 +1333,16 @@ body::after{
 .search-box input::placeholder{color:var(--ink-4);font-weight:500}
 .search-box svg{color:var(--ink-4);flex-shrink:0;transition:color .15s}
 .search-box:focus-within svg{color:var(--blue)}
-.search-dropdown{position:absolute;top:calc(100% + 8px);right:0;left:auto;min-width:320px;max-width:460px;background:#fffefb;border:1px solid #e6ddcc;border-radius:12px;box-shadow:0 12px 30px rgba(0,0,0,.12);max-height:320px;overflow-y:auto;z-index:80;font-size:.9rem}
+.search-dropdown{position:absolute;top:calc(100% + 8px);right:0;left:auto;min-width:320px;max-width:460px;background:#ffffff;border:1px solid #e2e8f0;border-radius:12px;box-shadow:0 12px 30px rgba(15,23,32,.12);max-height:320px;overflow-y:auto;z-index:80;font-size:.9rem}
 .search-dropdown[hidden]{display:none}
-.search-dropdown a{display:block;padding:.7rem .9rem;text-decoration:none;color:#0f1720;border-bottom:1px solid #eee;transition:background .12s}
+.search-dropdown a{display:block;padding:.7rem .9rem;text-decoration:none;color:#0f1720;border-bottom:1px solid #eef2f7;transition:background .12s}
 .search-dropdown a:last-child{border-bottom:0}
-.search-dropdown a:hover,.search-dropdown a.is-active{background:#f6f1e8}
+.search-dropdown a:hover,.search-dropdown a.is-active{background:#eff6ff}
 .search-dropdown .sr-title{font-weight:600;line-height:1.25;color:#0f1720}
 .search-dropdown .sr-hint{font-size:.78rem;color:#5c5c5c;margin-top:2px}
 .search-dropdown .sr-empty{padding:.9rem;color:#666;font-style:italic}
 
-.zip-btn,.print-btn{
+.zip-btn{
   display:inline-flex;align-items:center;gap:8px;
   padding:9px 16px;border-radius:11px;
   font-size:.8rem;font-weight:700;text-decoration:none;
@@ -1403,8 +1350,6 @@ body::after{
   transition:all .18s var(--ease);
   white-space:nowrap;position:relative;overflow:hidden;
   font-family:inherit;
-}
-.zip-btn{
   background:var(--navy);color:#fff;
   border:1px solid var(--navy);
   box-shadow:0 4px 12px -2px rgba(15,23,32,.25);
@@ -1426,21 +1371,13 @@ body::after{
   border:2px solid currentColor;border-top-color:transparent;border-radius:50%;
   animation:spin .7s linear infinite;margin-left:2px;
 }
-.print-btn{
-  background:var(--paper);color:var(--ink-2);
-  border:1px solid var(--line-2);
-}
-.print-btn:hover{
-  background:var(--paper-2);border-color:var(--ink-4);
-  transform:translateY(-1px);
-}
 @keyframes spin{to{transform:rotate(360deg)}}
 
 /* SHARE STRIP */
 .share-strip{
   display:flex;align-items:center;gap:20px;flex-wrap:wrap;
   padding:12px 40px;
-  background:linear-gradient(90deg, rgba(5,150,105,.05), rgba(37,99,235,.04));
+  background:linear-gradient(90deg, rgba(5,150,105,.04), rgba(37,99,235,.04));
   border-bottom:1px solid var(--line);
   font-size:.78rem;
 }
@@ -1464,12 +1401,12 @@ body::after{
 
 /* HERO */
 .hero{
-  padding:48px 40px 24px;
+  padding:24px 40px 16px;
   display:flex;align-items:flex-end;justify-content:space-between;
-  gap:40px;flex-wrap:wrap;
+  gap:20px;flex-wrap:wrap;
   max-width:1440px;margin:0 auto;width:100%;
 }
-.hero-left{min-width:0;flex:1;max-width:520px}
+.hero-left{min-width:0;flex:1;max-width:560px}
 .hero-eyebrow{
   display:inline-flex;align-items:center;gap:8px;
   font-size:.72rem;font-weight:700;
@@ -1486,13 +1423,13 @@ body::after{
 }
 .hero h1{
   font-family:'Fraunces',Georgia,serif;
-  font-size:clamp(2.2rem,4.6vw,3.6rem);
-  font-weight:700;letter-spacing:-.025em;line-height:1.05;
-  color:var(--ink);margin:0 0 14px;
+  font-size:clamp(1.6rem, 3vw, 2.2rem);
+  font-weight:700;letter-spacing:-.02em;line-height:1.15;
+  color:var(--ink);margin:0 0 8px;
 }
 .hero h1 em{
   font-style:italic;font-weight:500;
-  background:linear-gradient(135deg,var(--blue),var(--accent-2));
+  background:linear-gradient(135deg,var(--blue),var(--blue-2));
   -webkit-background-clip:text;background-clip:text;
   -webkit-text-fill-color:transparent;
 }
@@ -1512,7 +1449,7 @@ body::after{
 }
 .hero-stat::before{
   content:'';position:absolute;top:0;left:0;right:0;height:3px;
-  background:linear-gradient(90deg,var(--blue),var(--accent));
+  background:linear-gradient(90deg,var(--blue),var(--blue-2));
   opacity:0;transition:opacity .2s;
 }
 .hero-stat:hover{transform:translateY(-2px);box-shadow:var(--shadow)}
@@ -1534,160 +1471,119 @@ body::after{
   padding:32px 40px 80px;
   flex:1;max-width:1440px;margin:0 auto;width:100%;
 }
+.content.content--flush{
+  padding-top:20px;
+}
 
 /* SECTION HEADS */
 .section-head{
   display:flex;align-items:center;justify-content:space-between;
-  gap:16px;margin-bottom:18px;flex-wrap:wrap;
+  gap:16px;margin-bottom:20px;flex-wrap:wrap;
 }
 .section-head h2{
   font-family:'Fraunces',Georgia,serif;
-  font-size:1.25rem;font-weight:700;letter-spacing:-.015em;
+  font-size:1.35rem;font-weight:700;letter-spacing:-.015em;
   color:var(--ink);margin:0;
 }
 .section-head .sh-meta{
   font-size:.78rem;color:var(--ink-4);font-weight:600;
 }
 
-/* RECENT RAIL */
-.recent-rail{
-  display:grid;
-  grid-template-columns:repeat(auto-fill,minmax(260px,1fr));
-  gap:12px;
-  margin-bottom:40px;
-}
-.recent-card{
-  background:var(--paper);border:1px solid var(--line);
-  border-radius:12px;padding:14px;
-  display:flex;align-items:center;gap:12px;
-  text-decoration:none;color:inherit;
-  transition:all .2s var(--ease);
-  box-shadow:var(--shadow-sm);
-  position:relative;overflow:hidden;
-}
-.recent-card::before{
-  content:'';position:absolute;left:0;top:0;bottom:0;width:3px;
-  background:linear-gradient(180deg,var(--success),var(--blue));
-  opacity:.55;
-}
-.recent-card:hover{
-  transform:translateY(-2px);
-  border-color:rgba(5,150,105,.3);
-  box-shadow:var(--shadow);
-}
-.recent-card:hover::before{opacity:1}
-.recent-ico{
-  width:36px;height:36px;flex-shrink:0;
-  border-radius:9px;
-  background:var(--paper-2);
-  border:1px solid var(--line);
-  display:flex;align-items:center;justify-content:center;
-  color:var(--ink-3);
-}
-.recent-body{flex:1;min-width:0}
-.recent-title{
-  font-size:.82rem;font-weight:700;color:var(--ink);
-  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
-  margin-bottom:3px;
-}
-.recent-meta{
-  font-size:.68rem;color:var(--ink-4);font-weight:600;
-  display:flex;align-items:center;gap:6px;flex-wrap:wrap;
-}
-.recent-meta .rm-chip{
-  background:var(--success-bg);
-  color:var(--success);
-  padding:2px 6px;border-radius:4px;
-  font-size:.6rem;font-weight:800;letter-spacing:.03em;
-  text-transform:uppercase;
-  border:1px solid var(--success-line);
-}
-
-/* DEPT CARDS */
+/* ========== DEPARTMENT CARDS (COMPACT) ========== */
 .dept-grid{
   display:grid;
-  grid-template-columns:repeat(auto-fill,minmax(260px,1fr));
+  grid-template-columns:repeat(auto-fill,minmax(240px,1fr));
   gap:12px;
 }
 .dept-card{
-  background:var(--paper);border:1px solid var(--line);
-  border-radius:var(--radius-lg);padding:16px;
-  position:relative;overflow:hidden;text-decoration:none;color:inherit;
-  display:flex;flex-direction:column;gap:10px;
+  background:var(--paper);
+  border:1px solid var(--line);
+  border-radius:14px;
+  padding:14px 16px;
+  position:relative;
+  overflow:hidden;
+  text-decoration:none;
+  color:inherit;
+  display:flex;
+  flex-direction:column;
+  gap:12px;
   box-shadow:var(--shadow-sm);
-  transition:all .3s var(--ease);
+  transition:all .25s var(--ease);
   isolation:isolate;
 }
 .dept-card::before{
-  content:'';position:absolute;top:-60px;right:-60px;width:200px;height:200px;border-radius:50%;
+  content:'';position:absolute;top:-60px;right:-60px;width:180px;height:180px;border-radius:50%;
   background:radial-gradient(circle, rgba(37,99,235,.12), transparent 70%);
-  transition:transform .5s var(--ease),opacity .4s;opacity:.6;z-index:-1;
+  transition:transform .5s var(--ease),opacity .4s;opacity:.5;z-index:-1;
 }
 .dept-card::after{
-  content:'';position:absolute;inset:0;border-radius:var(--radius-lg);
-  background:linear-gradient(135deg,transparent 60%,rgba(37,99,235,.03));
+  content:'';position:absolute;inset:0;border-radius:14px;
+  background:linear-gradient(135deg,transparent 55%,rgba(37,99,235,.04));
   opacity:0;transition:opacity .3s;z-index:-1;pointer-events:none;
 }
 .dept-card:hover{
-  transform:translateY(-4px);
+  transform:translateY(-3px);
   box-shadow:var(--shadow-glow);
-  border-color:rgba(37,99,235,.25);
+  border-color:rgba(37,99,235,.28);
 }
 .dept-card:hover::before{transform:scale(1.4);opacity:1}
 .dept-card:hover::after{opacity:1}
-.dept-card-head{display:flex;align-items:center;gap:18px}
+
+.dept-card-head{display:flex;align-items:flex-start;gap:12px}
 .dept-icon-wrap{
-  width:64px;height:64px;flex-shrink:0;
+  width:42px;height:42px;flex-shrink:0;
   display:flex;align-items:center;justify-content:center;
-  background:linear-gradient(135deg,#fff7e6,#fef3c7);
-  border-radius:18px;
-  border:1px solid rgba(245,158,11,.2);
-  transition:transform .35s var(--ease-spring);
-  box-shadow:0 6px 14px -4px rgba(245,158,11,.3), inset 0 1px 0 rgba(255,255,255,.7);
+  background:var(--paper-2);
+  border-radius:11px;
+  border:1px solid var(--line);
+  transition:transform .4s var(--ease-spring);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.8), 0 2px 6px -2px rgba(15,23,32,.06);
 }
-.dept-card:hover .dept-icon-wrap{transform:scale(1.06) rotate(-5deg)}
-.dept-icon-wrap svg{filter:drop-shadow(0 2px 3px rgba(180,83,9,.2))}
-.dept-title-wrap{flex:1;min-width:0}
+.dept-card:hover .dept-icon-wrap{transform:scale(1.06) rotate(-4deg)}
+.dept-icon-wrap svg{filter:drop-shadow(0 2px 3px rgba(180,83,9,.18))}
+
+.dept-title-wrap{flex:1;min-width:0;padding-top:1px}
 .dept-title{
   font-family:'Fraunces',Georgia,serif;
-  font-size:1.25rem;font-weight:600;
-  letter-spacing:-.015em;line-height:1.2;
-  color:var(--ink);margin:0 0 8px;
+  font-size:1rem;font-weight:600;
+  letter-spacing:-.015em;line-height:1.25;
+  color:var(--ink);margin:0 0 6px;
   overflow-wrap:break-word;word-break:break-word;
 }
-.dept-badges{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.dept-badges{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
 .dept-chip{
-  display:inline-flex;align-items:center;gap:5px;
-  font-size:.68rem;font-weight:700;
-  padding:3px 8px;border-radius:6px;
+  display:inline-flex;align-items:center;gap:4px;
+  font-size:.64rem;font-weight:700;
+  padding:3px 7px;border-radius:6px;
   background:var(--paper-2);
   border:1px solid var(--line);
   color:var(--ink-3);
+  line-height:1;
 }
+.dept-chip strong{color:var(--blue);font-weight:800;font-size:.7rem}
 .dept-chip.chip-verified{
   background:var(--success-bg);
   border-color:var(--success-line);
   color:var(--success);
 }
-.dept-chip strong{color:var(--blue);font-weight:800}
+
 .dept-foot{
   display:flex;align-items:center;justify-content:space-between;
-  gap:10px;padding-top:14px;
+  gap:8px;padding-top:10px;
   border-top:1px solid var(--line);
   margin-top:auto;
 }
-.dept-coverage{
-  display:flex;align-items:center;gap:5px;
-}
-.dept-dot{
-  width:7px;height:7px;border-radius:50%;
-  background:var(--line-2);
-}
-.dept-dot.is-active{background:var(--success);box-shadow:0 0 0 2px rgba(5,150,105,.15)}
 .dept-updated{
-  font-size:.7rem;color:var(--ink-4);font-weight:600;
-  display:inline-flex;align-items:center;gap:4px;
+  font-size:.68rem;color:var(--ink-4);font-weight:600;
+  display:inline-flex;align-items:center;gap:5px;
 }
+.dept-cta{
+  display:inline-flex;align-items:center;gap:4px;
+  font-size:.68rem;font-weight:800;color:var(--blue);
+  letter-spacing:.02em;text-transform:uppercase;
+  transition:gap .2s var(--ease);
+}
+.dept-card:hover .dept-cta{gap:8px}
 
 /* FOLDER TILES */
 .folders-grid{
@@ -1738,70 +1634,46 @@ body::after{
 }
 .folder-tile-zip.is-disabled{background:transparent;border:1px dashed var(--line-2);color:var(--ink-4);pointer-events:none;opacity:.5}
 
-/* DOC CARDS — COMPACT */
+/* DOC CARDS — clean, download-only */
 .req-section{margin-bottom:32px}
 .req-section:last-child{margin-bottom:0}
-.docs-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px}
+.docs-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px}
 .doc-card{
   background:var(--paper);border:1px solid var(--line);
-  border-radius:10px;padding:6px 8px;
+  border-radius:10px;padding:9px 11px;
   display:flex;align-items:center;gap:10px;
   position:relative;overflow:hidden;
   transition:all .2s var(--ease);
   box-shadow:var(--shadow-sm);
 }
-.doc-card::before{
-  content:'';position:absolute;left:0;top:0;bottom:0;width:3px;
-  background:linear-gradient(180deg,var(--blue),var(--accent));
-  transform:scaleY(0);transform-origin:top;
-  transition:transform .25s var(--ease);
-}
-.doc-card:hover{
-  transform:translateY(-2px);
-  border-color:rgba(37,99,235,.2);
-  box-shadow:var(--shadow);
-}
-.doc-card:hover::before{transform:scaleY(1)}
+.doc-card:hover{border-color:rgba(37,99,235,.28);box-shadow:var(--shadow);transform:translateY(-1px)}
 .doc-card-icon{
-  width:30px;height:36px;flex-shrink:0;
+  width:28px;height:32px;flex-shrink:0;
   position:relative;display:flex;align-items:center;justify-content:center;
   transition:transform .25s var(--ease-spring);
 }
-.doc-card:hover .doc-card-icon{transform:scale(1.06) rotate(-3deg)}
-.doc-card-verified{
-  position:absolute;bottom:-2px;right:-4px;
-  width:14px;height:14px;border-radius:50%;
-  background:var(--success);color:#fff;
-  display:flex;align-items:center;justify-content:center;
-  border:1.5px solid var(--paper);
-  box-shadow:0 2px 4px rgba(5,150,105,.35);
-}
-.doc-card-body{flex:1;min-width:0;padding-right:2px}
+.doc-card:hover .doc-card-icon{transform:scale(1.08)}
+.doc-card-icon svg{width:100%;height:100%;display:block}
+.doc-card-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
 .doc-card-name{
-  font-size:.78rem;font-weight:700;color:var(--ink);line-height:1.3;
+  font-size:.82rem;font-weight:700;color:var(--ink);line-height:1.3;
   overflow:hidden;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;
   word-break:break-word;margin-bottom:3px;
 }
-.doc-card-meta{display:flex;align-items:center;gap:4px;font-size:.66rem;color:var(--ink-4);font-weight:600}
-.doc-card-meta .dot{opacity:.7}
-.doc-card-actions{display:flex;flex-direction:column;gap:4px;flex-shrink:0}
-.dc-btn{
-  width:26px;height:26px;border-radius:7px;
+.doc-card-meta{display:flex;align-items:center;gap:4px;font-size:.68rem;color:var(--ink-4);font-weight:600}
+.doc-card-meta .dot{opacity:.5}
+.doc-card-actions{flex-shrink:0;display:flex;align-items:center;gap:4px}
+.dc-btn-download{
+  width:28px;height:28px;border-radius:8px;
   display:flex;align-items:center;justify-content:center;
-  border:1px solid var(--line);background:var(--paper);
-  color:var(--ink-3);cursor:pointer;text-decoration:none;
+  background:var(--paper-2);border:1px solid var(--line);color:var(--ink-3);
+  text-decoration:none;cursor:pointer;
   transition:all .15s var(--ease);
 }
-.dc-btn:hover{
-  background:rgba(37,99,235,.08);
-  border-color:rgba(37,99,235,.25);
-  color:var(--blue);
-  transform:scale(1.08);
-}
-.dc-btn-download{background:var(--navy);border-color:var(--navy);color:#fff}
 .dc-btn-download:hover{
   background:var(--blue);border-color:var(--blue);color:#fff;
-  box-shadow:0 4px 12px -2px var(--blue-glow);
+  transform:translateY(-1px) scale(1.05);
+  box-shadow:0 4px 10px -2px var(--blue-glow);
 }
 
 /* EMPTY STATE */
@@ -1812,10 +1684,10 @@ body::after{
 }
 .empty-ico{
   width:88px;height:88px;margin:0 auto 22px;
-  background:linear-gradient(135deg,#fff7e6,#fef3c7);
+  background:linear-gradient(135deg,#eff6ff,#dbeafe);
   border-radius:50%;
   display:flex;align-items:center;justify-content:center;
-  box-shadow:0 12px 28px -8px rgba(245,158,11,.3);
+  box-shadow:0 12px 28px -8px rgba(37,99,235,.28);
 }
 .empty-state h3{
   font-family:'Fraunces',Georgia,serif;
@@ -1877,122 +1749,17 @@ body::after{
   .site-footer{padding:36px 20px 20px}
 }
 
-/* MODAL */
-.modal{
-  position:fixed;inset:0;z-index:9999;
-  background:rgba(11,27,43,.82);
-  backdrop-filter:blur(12px) saturate(140%);
-  -webkit-backdrop-filter:blur(12px) saturate(140%);
-  display:flex;align-items:center;justify-content:center;padding:24px;
-}
-.modal[hidden]{display:none}
-.modal:not([hidden]){animation:modalFade .25s var(--ease)}
-@keyframes modalFade{from{opacity:0}to{opacity:1}}
-.modal-box{
-  background:var(--paper);
-  border-radius:var(--radius-lg);
-  max-width:1080px;width:100%;max-height:92vh;
-  display:flex;flex-direction:column;
-  box-shadow:0 40px 100px -20px rgba(0,0,0,.6), 0 0 0 1px rgba(255,255,255,.05);
-  overflow:hidden;
-  animation:modalPop .35s var(--ease-spring);
-}
-@keyframes modalPop{
-  from{transform:translateY(20px) scale(.96);opacity:0}
-  to{transform:translateY(0) scale(1);opacity:1}
-}
-.modal-head{
-  padding:18px 24px;border-bottom:1px solid var(--line);
-  display:flex;align-items:center;justify-content:space-between;gap:16px;
-  background:var(--paper-2);
-}
-.modal-head-left{display:flex;align-items:center;gap:14px;min-width:0}
-.modal-ico{
-  width:40px;height:40px;border-radius:11px;flex-shrink:0;
-  background:linear-gradient(135deg,var(--blue),var(--blue-2));color:#fff;
-  display:flex;align-items:center;justify-content:center;
-  box-shadow:0 6px 14px -4px var(--blue-glow);
-}
-.modal-title{
-  font-family:'Inter',sans-serif;
-  font-size:.95rem;font-weight:700;color:var(--ink);
-  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
-}
-.modal-close{
-  border:0;background:var(--paper);width:38px;height:38px;border-radius:10px;
-  cursor:pointer;color:var(--ink-3);
-  display:flex;align-items:center;justify-content:center;font-size:16px;
-  flex-shrink:0;transition:all .15s var(--ease);
-  box-shadow:inset 0 0 0 1px var(--line);
-}
-.modal-close:hover{
-  background:rgba(220,38,38,.08);
-  color:var(--danger);
-  box-shadow:inset 0 0 0 1px rgba(220,38,38,.25);
-  transform:rotate(90deg);
-}
-.modal-body{
-  flex:1;overflow:auto;background:var(--cream-2);
-  display:flex;align-items:center;justify-content:center;
-  min-height:400px;padding:20px;
-}
-.modal-body iframe{
-  width:100%;height:74vh;border:none;border-radius:12px;background:#fff;
-  box-shadow:0 8px 32px -8px rgba(0,0,0,.15);
-}
-.modal-body img{
-  max-width:100%;max-height:74vh;border-radius:12px;
-  box-shadow:0 8px 32px -8px rgba(0,0,0,.15);
-}
-.modal-fallback{text-align:center;padding:48px 28px;max-width:440px}
-.modal-fallback h4{
-  font-family:'Fraunces',Georgia,serif;
-  font-size:1.3rem;font-weight:700;margin:0 0 10px;color:var(--ink);
-}
-.modal-fallback p{color:var(--ink-3);margin:0 0 22px;font-size:.9rem;line-height:1.6}
-.modal-fallback .btn-download{
-  display:inline-flex;align-items:center;gap:8px;
-  background:var(--blue);color:#fff;
-  padding:11px 20px;border-radius:11px;text-decoration:none;
-  font-weight:700;font-size:.85rem;transition:all .15s var(--ease);
-  box-shadow:0 6px 16px -4px var(--blue-glow);
-}
-.modal-fallback .btn-download:hover{background:var(--blue-2);transform:translateY(-1px)}
-.modal-foot{
-  padding:14px 24px;border-top:1px solid var(--line);
-  display:flex;align-items:center;justify-content:flex-end;gap:8px;
-  background:var(--paper-2);
-}
-.mf-btn{
-  display:inline-flex;align-items:center;gap:8px;
-  padding:10px 18px;border-radius:11px;
-  font-size:.82rem;font-weight:700;cursor:pointer;text-decoration:none;
-  border:1px solid transparent;font-family:inherit;line-height:1;
-  transition:all .15s var(--ease);
-}
-.mf-btn-primary{
-  background:var(--navy);border-color:var(--navy);color:#fff;
-  box-shadow:0 4px 12px -2px rgba(15,23,32,.25);
-}
-.mf-btn-primary:hover{
-  background:var(--blue);border-color:var(--blue);
-  transform:translateY(-1px);box-shadow:0 8px 20px -4px var(--blue-glow);
-}
-.mf-btn-secondary{background:var(--paper);border-color:var(--line-2);color:var(--ink-2)}
-.mf-btn-secondary:hover{background:var(--paper-2);color:var(--ink)}
-
 /* STAGGER REVEAL */
 @keyframes fadeUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
-.dept-card,.folder-tile,.doc-card,.recent-card{animation:fadeUp .5s var(--ease) backwards}
-.dept-card:nth-child(1),.folder-tile:nth-child(1),.doc-card:nth-child(1),.recent-card:nth-child(1){animation-delay:.02s}
-.dept-card:nth-child(2),.folder-tile:nth-child(2),.doc-card:nth-child(2),.recent-card:nth-child(2){animation-delay:.05s}
-.dept-card:nth-child(3),.folder-tile:nth-child(3),.doc-card:nth-child(3),.recent-card:nth-child(3){animation-delay:.08s}
-.dept-card:nth-child(4),.folder-tile:nth-child(4),.doc-card:nth-child(4),.recent-card:nth-child(4){animation-delay:.11s}
-.dept-card:nth-child(5),.folder-tile:nth-child(5),.doc-card:nth-child(5),.recent-card:nth-child(5){animation-delay:.14s}
-.dept-card:nth-child(6),.folder-tile:nth-child(6),.doc-card:nth-child(6),.recent-card:nth-child(6){animation-delay:.17s}
-.dept-card:nth-child(n+7),.folder-tile:nth-child(n+7),.doc-card:nth-child(n+7),.recent-card:nth-child(n+7){animation-delay:.20s}
+.dept-card,.folder-tile,.doc-card{animation:fadeUp .5s var(--ease) backwards}
+.dept-card:nth-child(1),.folder-tile:nth-child(1),.doc-card:nth-child(1){animation-delay:.02s}
+.dept-card:nth-child(2),.folder-tile:nth-child(2),.doc-card:nth-child(2){animation-delay:.05s}
+.dept-card:nth-child(3),.folder-tile:nth-child(3),.doc-card:nth-child(3){animation-delay:.08s}
+.dept-card:nth-child(4),.folder-tile:nth-child(4),.doc-card:nth-child(4){animation-delay:.11s}
+.dept-card:nth-child(5),.folder-tile:nth-child(5),.doc-card:nth-child(5){animation-delay:.14s}
+.dept-card:nth-child(6),.folder-tile:nth-child(6),.doc-card:nth-child(6){animation-delay:.17s}
+.dept-card:nth-child(n+7),.folder-tile:nth-child(n+7),.doc-card:nth-child(n+7){animation-delay:.20s}
 
-/* SEARCH FILTER STATE */
 .is-hidden{display:none !important}
 .no-results{
   grid-column:1/-1;text-align:center;padding:40px;
@@ -2032,16 +1799,15 @@ body::after{
   .hero{padding:36px 20px 16px;gap:28px}
   .content{padding:24px 20px 60px}
   .search-box{display:none}
-  .dept-grid{grid-template-columns:repeat(auto-fill,minmax(280px,1fr))}
-  .docs-grid{grid-template-columns:repeat(auto-fill,minmax(200px,1fr))}
-  .recent-rail{grid-template-columns:repeat(auto-fill,minmax(240px,1fr))}
+  .dept-grid{grid-template-columns:repeat(auto-fill,minmax(220px,1fr))}
+  .docs-grid{grid-template-columns:repeat(auto-fill,minmax(220px,1fr))}
 }
 @media (max-width:560px){
   .topbar{padding:12px 16px}
   .topbar-badge{display:none}
   .subheader{padding:8px 16px;top:65px;flex-wrap:wrap}
   .subheader-actions{width:100%;justify-content:space-between}
-  .zip-btn,.print-btn{padding:10px 14px;flex:1;justify-content:center}
+  .zip-btn{padding:10px 14px;flex:1;justify-content:center}
   .share-strip{padding:10px 16px;gap:14px;justify-content:space-between}
   .share-strip-title{display:none}
   .share-stat + .share-stat{padding-left:0}
@@ -2051,51 +1817,11 @@ body::after{
   .hero-stat{flex:1;min-width:0;padding:14px;text-align:center}
   .hero-stat-num{font-size:1.7rem}
   .content{padding:16px 16px 48px}
-  .dept-grid,.folders-grid,.docs-grid,.recent-rail{grid-template-columns:1fr}
-  .modal{padding:0}
-  .modal-box{max-height:100vh;border-radius:0}
-  .modal-body iframe{height:60vh}
-  .modal-body img{max-height:60vh}
-  .modal-foot{padding:12px 16px}
-  .mf-btn{padding:9px 14px;font-size:.78rem}
+  .dept-grid,.folders-grid,.docs-grid{grid-template-columns:1fr}
 }
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation-duration:.001ms !important;transition-duration:.001ms !important;scroll-behavior:auto !important}
   .doc-card.is-highlighted{animation:none}
-}
-
-/* ============================================================
-   PRINT — evaluators can print a clean departmental inventory
-   ============================================================ */
-@media print{
-  @page{margin:14mm}
-  body{background:#fff;color:#000;font-size:10.5pt}
-  body::before,body::after{display:none}
-  .trust-banner,.topbar,.subheader,.share-strip,.hero-stats,.zip-btn,.print-btn,
-  .search-box,.search-dropdown,.topbar-badge,.doc-card-actions,.folder-tile-zip,
-  .modal,.site-footer .fb-badge,.kbd-hint,.recent-rail{display:none !important}
-  .app,.main,.content,.hero,.site-footer{max-width:none;padding:0;margin:0}
-  .hero{padding-bottom:8pt;border-bottom:1pt solid #ccc;margin-bottom:12pt;display:block}
-  .hero h1{font-size:22pt;color:#000}
-  .hero h1 em{color:#000;-webkit-text-fill-color:#000}
-  .hero-eyebrow,.hero-desc{color:#333;background:none;border:none;padding:0;display:block;font-size:9pt;margin:0 0 4pt}
-  .content{padding:0}
-  .dept-grid,.docs-grid,.folders-grid{display:block}
-  .dept-card,.doc-card,.folder-tile,.recent-card{
-    page-break-inside:avoid;break-inside:avoid;
-    box-shadow:none;border:1pt solid #ccc;margin-bottom:6pt;
-    padding:6pt 8pt;
-  }
-  .dept-card{padding:10pt}
-  .doc-card-verified{display:none}
-  .doc-card::before,.dept-card::before,.dept-card::after{display:none}
-  .site-footer{background:#fff;color:#000;padding:8pt 0 0;border-top:1pt solid #ccc;margin-top:14pt}
-  .footer-brand h4,.footer-col h5,.footer-col li,.footer-col li strong{color:#000}
-  .footer-col h5{border-bottom:1pt solid #999;padding-bottom:2pt;margin-bottom:4pt}
-  .section-head h2{color:#000;font-size:14pt}
-  .doc-card-name{font-size:10pt}
-  a{color:#000;text-decoration:none}
-  a[href]::after{content:""}
 }
 </style>
 </head>
@@ -2105,14 +1831,11 @@ body::after{
 
   <!-- ===== TRUST BANNER ===== -->
   <div class="trust-banner" role="region" aria-label="Trust indicators">
-    <span class="tb-item"><?= icon_verified_badge(13) ?><span class="tb-
-      <!-- ===== TRUST BANNER ===== -->
-  <div class="trust-banner" role="region" aria-label="Trust indicators">
-    <span class="tb-item"><?= icon_verified_badge(13) ?><span class="tb-strong">Officially Verified</span> Documents</span>
+    <span class="tb-item"><?= icon_verified_badge(13) ?><span class="tb-strong">Officially Verified</span>&nbsp;Documents</span>
     <span class="tb-sep">•</span>
-    <span class="tb-item"><?= icon_lock(13) ?>End-to-end encrypted access</span>
+    <span class="tb-item"><?= icon_lock(13) ?>&nbsp;Encrypted access</span>
     <span class="tb-sep">•</span>
-    <span class="tb-item"><?= icon_clock(13) ?>Link expires <strong><?= htmlspecialchars($expiresLocal, ENT_QUOTES, 'UTF-8') ?></strong></span>
+    <span class="tb-item"><?= icon_clock(13) ?>&nbsp;Link expires <strong>&nbsp;<?= htmlspecialchars($expiresLocal, ENT_QUOTES, 'UTF-8') ?></strong></span>
   </div>
 
   <main class="main">
@@ -2164,9 +1887,6 @@ body::after{
           <span class="kbd-hint" aria-hidden="true">/</span>
         </label>
         <div id="searchResults" class="search-dropdown" role="listbox" aria-live="polite" hidden></div>
-        <button type="button" class="print-btn js-print" title="Print inventory (Ctrl+P)">
-          <?= icon_print(13) ?><span>Print</span>
-        </button>
         <?php if ($viewDept !== null): ?>
           <a class="zip-btn js-zip" href="?t=<?= $tq ?>&amp;action=zip&amp;dept=<?= (int)$viewDept ?><?= $viewFolder > 0 ? '&amp;folder=' . (int)$viewFolder : '' ?>">
             <?= icon_zip(13) ?><span>Download ZIP</span>
@@ -2179,16 +1899,16 @@ body::after{
       </div>
     </div>
 
-    <!-- SHARE INFO STRIP -->
-    <div class="share-strip" aria-label="Share info">
-      <span class="share-strip-title"><?= icon_verified_badge(11) ?> Secure Share</span>
-      <span class="share-stat"><span class="k">Expires</span> <span class="v"><?= htmlspecialchars($expiresLocal, ENT_QUOTES, 'UTF-8') ?></span></span>
-      <span class="share-stat"><span class="k">Slots left</span> <span class="v"><?= htmlspecialchars($slotsLabel, ENT_QUOTES, 'UTF-8') ?></span></span>
-      <span class="share-stat"><span class="k">Total files</span> <span class="v"><?= (int)$totalDocs ?></span></span>
-    </div>
-
     <?php if ($viewDept === null): ?>
       <!-- =========================== ALL DEPARTMENTS =========================== -->
+      <!-- SHARE INFO STRIP (only on all-departments page) -->
+      <div class="share-strip" aria-label="Share info">
+        <span class="share-strip-title"><?= icon_verified_badge(11) ?> Secure Share</span>
+        <span class="share-stat"><span class="k">Expires</span> <span class="v"><?= htmlspecialchars($expiresLocal, ENT_QUOTES, 'UTF-8') ?></span></span>
+        <span class="share-stat"><span class="k">Slots left</span> <span class="v"><?= htmlspecialchars($slotsLabel, ENT_QUOTES, 'UTF-8') ?></span></span>
+        <span class="share-stat"><span class="k">Total files</span> <span class="v"><?= (int)$totalDocs ?></span></span>
+      </div>
+
       <section class="hero">
         <div class="hero-left">
           <span class="hero-eyebrow"><span class="dot"></span> Prepared for CHED Evaluation</span>
@@ -2204,53 +1924,10 @@ body::after{
             <div class="hero-stat-num" data-count="<?= (int)$totalInScope ?>"><?= (int)$totalInScope ?></div>
             <div class="hero-stat-label">Documents</div>
           </div>
-          <div class="hero-stat">
-            <div class="hero-stat-num"><?= htmlspecialchars($slotsLabel, ENT_QUOTES, 'UTF-8') ?></div>
-            <div class="hero-stat-label">Slots left</div>
-          </div>
         </div>
       </section>
 
       <div class="content">
-
-        <?php if (!empty($recentDocs)): ?>
-          <!-- RECENT UPLOADS RAIL -->
-          <div class="section-head">
-            <h2>Recently Verified</h2>
-            <span class="sh-meta"><?= count($recentDocs) ?> latest upload<?= count($recentDocs) === 1 ? '' : 's' ?></span>
-          </div>
-          <div class="recent-rail">
-            <?php foreach ($recentDocs as $rd):
-              $rid   = (int)$rd['id'];
-              $rsrc  = $rd['source'] === 'ph_document' ? 'ph_document' : 'document';
-              $rtitle = trim((string)($rd['title'] ?? ''));
-              if ($rtitle === '' || strcasecmp($rtitle, 'Direct Upload') === 0) {
-                  $rtitle = (string)($rd['filename'] ?? 'Untitled');
-              }
-              $rext = strtolower(pathinfo((string)($rd['filename'] ?? ''), PATHINFO_EXTENSION));
-              $rdate = !empty($rd['upload_date']) ? utc_to_local($rd['upload_date'], 'M d, Y') : '';
-              $rsrcEnc = urlencode($rsrc);
-            ?>
-              <a class="recent-card js-view-doc"
-                 href="#"
-                 data-doc-id="<?= $rid ?>"
-                 data-source="<?= $rsrcEnc ?>"
-                 data-filename="<?= htmlspecialchars($rtitle, ENT_QUOTES, 'UTF-8') ?>"
-                 data-ext="<?= htmlspecialchars($rext, ENT_QUOTES, 'UTF-8') ?>"
-                 title="<?= htmlspecialchars($rtitle, ENT_QUOTES, 'UTF-8') ?>">
-                <span class="recent-ico"><?= icon_doc_v2(18) ?></span>
-                <div class="recent-body">
-                  <div class="recent-title"><?= htmlspecialchars($rtitle, ENT_QUOTES, 'UTF-8') ?></div>
-                  <div class="recent-meta">
-                    <span class="rm-chip">Verified</span>
-                    <span><?= htmlspecialchars((string)$rd['dept_name'], ENT_QUOTES, 'UTF-8') ?></span>
-                    <?php if ($rdate !== ''): ?><span>· <?= htmlspecialchars($rdate, ENT_QUOTES, 'UTF-8') ?></span><?php endif; ?>
-                  </div>
-                </div>
-              </a>
-            <?php endforeach; ?>
-          </div>
-        <?php endif; ?>
 
         <div class="section-head">
           <h2>Departments</h2>
@@ -2269,10 +1946,16 @@ body::after{
               $d = $card['dept'];
               $deptName = $d['department_name'];
               $count = (int)$card['count'];
+              $lastDate = '';
+              if (!empty($card['last_date'])) {
+                  try {
+                      $lastDate = utc_to_local($card['last_date'], 'M d, Y');
+                  } catch (Throwable $e) { $lastDate = ''; }
+              }
             ?>
               <a class="dept-card" href="?t=<?= $tq ?>&amp;dept=<?= (int)$d['id'] ?>" data-name="<?= htmlspecialchars(strtolower($deptName), ENT_QUOTES, 'UTF-8') ?>">
                 <div class="dept-card-head">
-                  <div class="dept-icon-wrap"><?= icon_folder_v2(48) ?></div>
+                  <div class="dept-icon-wrap"><?= icon_folder_v2(38) ?></div>
                   <div class="dept-title-wrap">
                     <h3 class="dept-title"><?= htmlspecialchars($deptName, ENT_QUOTES, 'UTF-8') ?></h3>
                     <div class="dept-badges">
@@ -2282,17 +1965,11 @@ body::after{
                   </div>
                 </div>
                 <div class="dept-foot">
-                  <div class="dept-coverage" aria-hidden="true">
-                    <?php
-                      /* visual progress: filled dots proportional to file count */
-                      $maxDots = 5;
-                      $filled  = (int)min($maxDots, max(1, (int)round($count / 6)));
-                      for ($di = 0; $di < $maxDots; $di++) {
-                          echo '<span class="dept-dot' . ($di < $filled ? ' is-active' : '') . '"></span>';
-                      }
-                    ?>
-                  </div>
-                  <span class="dept-updated"><?= icon_clock(11) ?> Ready to review</span>
+                  <span class="dept-updated">
+                    <?= icon_clock(10) ?>
+                    <?= $lastDate !== '' ? 'Updated ' . htmlspecialchars($lastDate, ENT_QUOTES, 'UTF-8') : 'Ready to review' ?>
+                  </span>
+                  <span class="dept-cta">Open <?= icon_chevron_right(11) ?></span>
                 </div>
               </a>
             <?php endforeach; ?>
@@ -2302,25 +1979,8 @@ body::after{
 
     <?php else: ?>
       <!-- =========================== DEPARTMENT VIEW =========================== -->
-      <section class="hero">
-        <div class="hero-left">
-          <span class="hero-eyebrow"><span class="dot"></span> Department Documents</span>
-          <h1><?= htmlspecialchars($viewFolder === 0 ? $viewDeptName : (end($breadcrumb)['name'] ?? $viewDeptName), ENT_QUOTES, 'UTF-8') ?></h1>
-          <p class="hero-desc">Verified compliance documents for this <?= $viewFolder > 0 ? 'folder' : 'department' ?>, ready for inspection.</p>
-        </div>
-        <div class="hero-stats">
-          <div class="hero-stat">
-            <div class="hero-stat-num" data-count="<?= (int)$viewCount ?>"><?= (int)$viewCount ?></div>
-            <div class="hero-stat-label">Documents</div>
-          </div>
-          <div class="hero-stat">
-            <div class="hero-stat-num"><?= count($viewTree['folders'] ?? []) ?></div>
-            <div class="hero-stat-label">Subfolders</div>
-          </div>
-        </div>
-      </section>
-
-      <div class="content">
+      <!-- No hero, no share strip — only folders and files -->
+      <div class="content content--flush">
         <?php
         $rendered = render_level($viewTree, $rawToken, $viewDept);
         if ($rendered === ''):
@@ -2338,7 +1998,8 @@ body::after{
 
   </main>
 
-  <!-- =========================== FOOTER =========================== -->
+  <?php if ($viewDept === null): ?>
+  <!-- =========================== FOOTER (HIDDEN IN DEPARTMENT VIEW) =========================== -->
   <footer class="site-footer" role="contentinfo">
     <div class="footer-inner">
       <div class="footer-brand">
@@ -2372,142 +2033,13 @@ body::after{
       <span class="fb-badge"><?= icon_verified_badge(11) ?> Verified Institutional Records</span>
     </div>
   </footer>
+  <?php endif; ?>
 
-</div>
-
-<!-- =========================== MODAL =========================== -->
-<div class="modal" id="viewModal" hidden>
-  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
-    <div class="modal-head">
-      <div class="modal-head-left">
-        <div class="modal-ico"><?= icon_doc_v2(18) ?></div>
-        <div class="modal-title" id="modalTitle">Document</div>
-      </div>
-      <button type="button" class="modal-close" aria-label="Close">✕</button>
-    </div>
-    <div class="modal-body" id="modalBody"></div>
-    <div class="modal-foot">
-      <a id="modalDownload" class="mf-btn mf-btn-primary" href="#">
-        <?= icon_download(14) ?> Download
-      </a>
-      <button type="button" class="mf-btn mf-btn-secondary js-close">Close</button>
-    </div>
-  </div>
 </div>
 
 <script<?= $nonceAttr ?>>
 (function () {
     var TOKEN = <?= json_encode((string)$rawToken, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_QUOT) ?>;
-    var previewable = ['pdf', 'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'];
-    var modal      = document.getElementById('viewModal');
-    var titleEl    = document.getElementById('modalTitle');
-    var bodyEl     = document.getElementById('modalBody');
-    var downloadEl = document.getElementById('modalDownload');
-    var lastFocused = null;
-
-    /* ---------- Preview modal ---------- */
-    function buildUrl(action, source, docId) {
-        return '?t=' + encodeURIComponent(TOKEN)
-             + '&action=' + action
-             + '&type=' + encodeURIComponent(source)
-             + '&doc=' + encodeURIComponent(docId);
-    }
-
-    function openModal(opts) {
-        var ext = (opts.ext || '').toLowerCase();
-        var previewUrl  = buildUrl('preview', opts.source, opts.docId);
-        var downloadUrl = buildUrl('download', opts.source, opts.docId);
-
-        lastFocused = document.activeElement;
-        titleEl.textContent = opts.filename || 'Document';
-        downloadEl.setAttribute('href', downloadUrl);
-        bodyEl.innerHTML = '';
-
-        if (previewable.indexOf(ext) !== -1) {
-            if (ext === 'pdf') {
-                var iframe = document.createElement('iframe');
-                iframe.src = previewUrl;
-                iframe.title = 'Document preview';
-                bodyEl.appendChild(iframe);
-            } else {
-                var img = document.createElement('img');
-                img.src = previewUrl;
-                img.alt = opts.filename || 'Preview';
-                bodyEl.appendChild(img);
-            }
-        } else {
-            // shortcut: uses external Google Docs Viewer for office/unknown files;
-            // requires public URL access (token in URL), <upgrade to server-side
-            // PDF conversion if external dependency is unacceptable>
-            var gUrl = 'https://docs.google.com/gview?embedded=1&url=' + encodeURIComponent(
-                window.location.protocol + '//' + window.location.host + window.location.pathname + previewUrl
-            );
-            var iframe = document.createElement('iframe');
-            iframe.src = gUrl;
-            iframe.title = 'Document preview — ' + (opts.filename || 'Document');
-            iframe.style.width = '100%';
-            iframe.style.height = '100%';
-            iframe.style.border = 'none';
-            bodyEl.appendChild(iframe);
-
-            var note = document.createElement('div');
-            note.className = 'modal-fallback';
-            note.innerHTML = '<p style="font-size:.8rem;color:#666;margin-top:8px;text-align:center;">' +
-                'If the preview does not load, <a href="' + downloadUrl + '">download the file</a> to open it locally.</p>';
-            bodyEl.appendChild(note);
-        }
-
-        modal.removeAttribute('hidden');
-        document.body.style.overflow = 'hidden';
-        var closeBtn = modal.querySelector('.modal-close');
-        if (closeBtn) closeBtn.focus();
-    }
-
-    function closeModal() {
-        modal.setAttribute('hidden', '');
-        bodyEl.innerHTML = '';
-        document.body.style.overflow = '';
-        if (lastFocused && typeof lastFocused.focus === 'function') lastFocused.focus();
-        lastFocused = null;
-    }
-
-    function trapFocus(container, e) {
-        var focusable = container.querySelectorAll('a[href],button:not([disabled]),input,select,textarea,[tabindex]:not([tabindex="-1"])');
-        if (!focusable.length) return;
-        var first = focusable[0], last = focusable[focusable.length - 1];
-        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
-        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
-    }
-
-    document.addEventListener('click', function (e) {
-        var btn = e.target.closest && e.target.closest('.js-view-doc');
-        if (btn) {
-            e.preventDefault();
-            openModal({
-                docId:    btn.getAttribute('data-doc-id') || '',
-                source:   btn.getAttribute('data-source') || 'document',
-                filename: btn.getAttribute('data-filename') || 'Document',
-                ext:      btn.getAttribute('data-ext') || ''
-            });
-            return;
-        }
-        if (e.target === modal) { closeModal(); return; }
-        if (e.target.closest && e.target.closest('.js-close, .modal-close')) closeModal();
-    });
-
-    document.addEventListener('keydown', function (e) {
-        if (modal.hasAttribute('hidden')) return;
-        if (e.key === 'Escape') closeModal();
-        else if (e.key === 'Tab') trapFocus(modal, e);
-    });
-
-    /* ---------- Print ---------- */
-    document.addEventListener('click', function (e) {
-        var p = e.target.closest && e.target.closest('.js-print');
-        if (!p) return;
-        e.preventDefault();
-        window.print();
-    });
 
     /* ---------- ZIP loading spinner ---------- */
     document.addEventListener('click', function (e) {
@@ -2555,9 +2087,7 @@ body::after{
             activeIndex = -1;
         }
 
-        function showDropdown() {
-            dropdown.hidden = false;
-        }
+        function showDropdown() { dropdown.hidden = false; }
 
         function setActive(idx) {
             var links = dropdown.querySelectorAll('a[data-i]');
@@ -2679,12 +2209,11 @@ body::after{
             if (!input.contains(e.target) && !dropdown.contains(e.target)) clearDropdown();
         });
 
-        /* ---------- "/" focus shortcut ---------- */
+        /* "/" focus shortcut */
         document.addEventListener('keydown', function (e) {
             var tag = (document.activeElement && document.activeElement.tagName) || '';
             var isField = /INPUT|TEXTAREA|SELECT/.test(tag) || (document.activeElement && document.activeElement.isContentEditable);
-            if (e.key === '/' && !isField && !modal.hasAttribute === false) {
-                if (!modal.hasAttribute('hidden')) return;
+            if (e.key === '/' && !isField) {
                 e.preventDefault();
                 input.focus();
             }
@@ -2701,11 +2230,9 @@ body::after{
         var id     = parseInt(parts[1], 10);
         if (!id) return;
 
-        var btn = document.querySelector(
-            '.js-view-doc[data-doc-id="' + id + '"][data-source="' + source + '"]'
+        var card = document.querySelector(
+            '.doc-card[data-doc-id="' + id + '"][data-source="' + source + '"]'
         );
-        if (!btn) return;
-        var card = btn.closest('.doc-card') || btn.closest('.recent-card');
         if (!card) return;
 
         card.classList.add('is-highlighted');

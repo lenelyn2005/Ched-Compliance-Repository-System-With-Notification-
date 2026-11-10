@@ -68,8 +68,6 @@ services:
       # --- Realtime notifications (WebSocket via wss://APP_HOST/ws) -------------
       - key: WS_SECRET
         generateValue: true
-      - key: WS_INTERNAL_SECRET
-        generateValue: true
       - key: WS_PUBLIC_PATH
         value: /ws
 

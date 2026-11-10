@@ -2,16 +2,12 @@
 define('CHED_APP', true);
 require_once 'config.php';
 require_once 'includes/avatar_helpers.php';
-requireAdmin();
-if (!superadmin()) {
-    header('Location: admin_settings.php');
-    exit;
-}
+requireSuperAdmin();
 
 $error = '';
 $success = '';
 $openTab = 'admin-account';
-$currentRole = ($_SESSION['role'] ?? 'admin');
+$currentRole = ($_SESSION['role'] ?? 'super_admin');
 
 if (isset($_GET['msg'])) {
     $success = $_GET['msg'];

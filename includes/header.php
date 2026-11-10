@@ -230,11 +230,8 @@ $hasAvatar     = !empty($headerAvatarUrl);
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <?php include __DIR__ . '/favicon.php'; ?>
     <meta name="csrf-token" content="<?= htmlspecialchars(getCsrfToken(), ENT_QUOTES, 'UTF-8') ?>">
-    <?php if (isset($_SESSION['user_id'])): ?>
-    <meta name="ws-ticket" content="<?= htmlspecialchars(generateWsTicket((int)$_SESSION['user_id']), ENT_QUOTES, 'UTF-8') ?>">
-    <?php endif; ?>
     <script nonce="<?= csp_nonce() ?>">
-        window.WS_HOST = <?= json_encode(getenv('WS_HOST') ?: 'localhost', JSON_UNESCAPED_SLASHES) ?>;
+        window.WS_HOST = <?= json_encode(getenv('WS_HOST') ?: '127.0.0.1', JSON_UNESCAPED_SLASHES) ?>;
         window.WS_PORT = <?= json_encode((string)(getenv('WS_PORT') ?: '8080'), JSON_UNESCAPED_SLASHES) ?>;
         window.WS_PATH = <?= json_encode((string)(getenv('WS_PUBLIC_PATH') ?: ''), JSON_UNESCAPED_SLASHES) ?>;
     </script>
@@ -355,16 +352,22 @@ $hasAvatar     = !empty($headerAvatarUrl);
             white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
         }
 
-        /* ---- CENTER: search trigger ---- */
+        /* ---- CENTER: inline search ---- */
+        .search-inline {
+            position: relative;
+            flex: 1 1 auto;
+            max-width: 440px;
+            margin: 0 auto;
+        }
+
         .search-trigger {
-            flex: 1 1 auto; max-width: 440px; margin: 0 auto;
             display: flex; align-items: center; gap: .65rem;
-            height: 42px; padding: 0 .55rem 0 .9rem;
+            height: 42px; padding: 0 .9rem;
             background: var(--surface-2);
             border: 1px solid transparent;
             border-radius: var(--r-full);
-            color: var(--text-3); font-size: .84rem; font-weight: 500;
-            cursor: pointer; text-align: left;
+            color: var(--text-3);
+            cursor: text;
             transition: background .2s ease, border-color .2s ease,
                         box-shadow .2s ease, color .2s ease;
         }
@@ -372,18 +375,59 @@ $hasAvatar     = !empty($headerAvatarUrl);
             background: var(--white); border-color: var(--line);
             color: var(--text-2); box-shadow: var(--sh-1);
         }
-        .search-trigger:focus-visible { outline: none; box-shadow: var(--ring); border-color: var(--primary); }
-        .search-trigger svg { flex-shrink: 0; width: 17px; height: 17px; }
-        .search-trigger .st-label {
-            flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        .search-trigger:focus-within {
+            background: var(--white);
+            border-color: var(--primary);
+            color: var(--text);
+            box-shadow: var(--ring);
         }
-        .search-trigger kbd {
-            flex-shrink: 0;
-            display: inline-flex; align-items: center; gap: 2px;
-            padding: .26rem .45rem; border-radius: 7px;
-            background: var(--white); border: 1px solid var(--line);
-            font: 700 .66rem/1 'Plus Jakarta Sans', sans-serif;
-            color: var(--text-3); box-shadow: var(--sh-1);
+        .search-trigger svg { flex-shrink: 0; width: 17px; height: 17px; }
+
+        .search-input {
+            flex: 1 1 auto; min-width: 0;
+            border: none; outline: none; background: transparent;
+            font: inherit; font-size: .84rem; font-weight: 500;
+            color: var(--text); letter-spacing: -.005em;
+        }
+        .search-input::placeholder { color: var(--text-3); font-weight: 500; }
+
+        /* Inline results dropdown (anchored under the header bar) */
+        .search-dropdown {
+            position: absolute; top: calc(100% + 8px); left: 0; right: 0;
+            z-index: 950;
+            background: var(--white);
+            border: 1px solid var(--line);
+            border-radius: var(--r-lg);
+            box-shadow: var(--sh-3);
+            overflow: hidden;
+            max-height: min(420px, calc(100vh - 140px));
+            overflow-y: auto;
+            padding: .4rem;
+            display: none;
+        }
+        .search-dropdown.show { display: block; }
+        .search-dropdown .cmdk-group-label {
+            padding: .55rem .7rem .25rem;
+            font-size: .63rem; font-weight: 800; letter-spacing: .09em;
+            text-transform: uppercase; color: var(--text-3);
+        }
+        .search-dropdown .cmdk-item {
+            display: flex; align-items: center; gap: .65rem;
+            padding: .55rem .7rem; border-radius: var(--r-sm);
+            text-decoration: none; color: var(--text);
+            font-size: .84rem; font-weight: 600;
+            transition: background .14s ease, color .14s ease;
+        }
+        .search-dropdown .cmdk-item:hover,
+        .search-dropdown .cmdk-item.is-active {
+            background: var(--primary-50); color: var(--primary-700);
+        }
+        .search-dropdown .cmdk-item .cmdk-hint {
+            margin-left: auto; font-size: .67rem; font-weight: 700; color: var(--text-3);
+        }
+        .search-dropdown .cmdk-empty {
+            padding: 1.6rem 1.25rem; text-align: center;
+            font-size: .8rem; color: var(--text-3); font-weight: 600;
         }
 
         /* ---- RIGHT cluster ---- */
@@ -1037,15 +1081,33 @@ $hasAvatar     = !empty($headerAvatarUrl);
            RESPONSIVE
            ============================================================ */
         @media (max-width: 1180px) {
-            .search-trigger { max-width: 300px; }
+            .search-inline { max-width: 300px; }
             .uc-meta { display: none; }
             .user-chip { padding: .25rem; gap: 0; }
         }
 
         @media (max-width: 992px) {
-            .search-trigger .st-label { display: none; }
-            .search-trigger { max-width: 42px; padding: 0; justify-content: center; }
-            .search-trigger kbd { display: none; }
+            /* collapsed to an icon pill; clicking expands it inline (still no modal) */
+            .search-inline { max-width: 42px; transition: max-width .25s var(--ease); }
+            .search-input { width: 0; opacity: 0; pointer-events: none; }
+            .search-trigger { padding: 0; justify-content: center; cursor: pointer; }
+            .search-clear { display: none; }
+
+            .search-inline.is-expanded {
+                max-width: 100%;
+                position: absolute; left: 1rem; right: 1rem; top: 50%;
+                transform: translateY(-50%);
+                z-index: 5;
+            }
+            .search-inline.is-expanded .search-trigger {
+                padding: 0 .9rem; justify-content: flex-start;
+                background: var(--white); border-color: var(--line);
+                box-shadow: var(--sh-2);
+            }
+            .search-inline.is-expanded .search-input {
+                width: auto; opacity: 1; pointer-events: auto;
+            }
+            .search-inline.is-expanded .search-clear { display: grid; }
         }
 
         @media (max-width: 768px) {
@@ -1060,20 +1122,68 @@ $hasAvatar     = !empty($headerAvatarUrl);
             .page-title { font-size: 1rem; }
         }
 
+        /* ============================================================
+           LOGOUT CONFIRMATION MODAL
+           ============================================================ */
+        .logout-modal {
+            position: fixed; inset: 0; z-index: 3000;
+            display: none; align-items: center; justify-content: center;
+            padding: 1.25rem;
+            background: rgba(15, 23, 42, .55);
+            -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px);
+        }
+        .logout-modal.show { display: flex; animation: logoutFadeIn .18s ease; }
+        @keyframes logoutFadeIn { from { opacity: 0; } to { opacity: 1; } }
+        .logout-modal-card {
+            width: 100%; max-width: 420px; background: var(--white);
+            border-radius: var(--r-lg); box-shadow: var(--sh-3);
+            overflow: hidden; animation: logoutRise .22s var(--ease);
+        }
+        @keyframes logoutRise {
+            from { opacity: 0; transform: translateY(12px) scale(.98); }
+            to { opacity: 1; transform: none; }
+        }
+        .logout-modal-head {
+            display: flex; align-items: center; gap: .65rem;
+            padding: 1.15rem 1.35rem; border-bottom: 1px solid var(--line-2);
+        }
+        .logout-modal-icon {
+            width: 38px; height: 38px; flex-shrink: 0; display: grid; place-items: center;
+            border-radius: 50%; background: var(--danger-50); color: var(--danger);
+        }
+        .logout-modal-icon svg { width: 20px; height: 20px; }
+        .logout-modal-head h2 {
+            margin: 0; font-size: 1.02rem; font-weight: 800;
+            color: var(--text); letter-spacing: -.015em;
+        }
+        .logout-modal-body { padding: 1.25rem 1.35rem; }
+        .logout-modal-body p { margin: 0; color: var(--text-2); font-size: .9rem; line-height: 1.6; }
+        .logout-modal-actions {
+            display: flex; justify-content: flex-end; gap: .6rem;
+            padding: 0 1.35rem 1.25rem;
+        }
+        .logout-btn {
+            padding: .58rem 1rem; border-radius: var(--r-sm); border: 1px solid transparent;
+            font-size: .85rem; font-weight: 700; cursor: pointer;
+            transition: background .15s ease, color .15s ease, border-color .15s ease, box-shadow .15s ease;
+        }
+        .logout-btn:focus-visible { outline: none; box-shadow: var(--ring); }
+        .logout-btn-cancel { background: var(--white); border-color: var(--line); color: var(--text-2); }
+        .logout-btn-cancel:hover { background: var(--surface-2); color: var(--text); }
+        .logout-btn-confirm { background: var(--danger); color: var(--white); }
+        .logout-btn-confirm:hover { background: #dc2626; }
+        .logout-btn-confirm:disabled { opacity: .7; cursor: default; }
         @media (max-width: 480px) {
-            .panel { width: calc(100vw - 1.5rem); right: .75rem; }
-            .notif-panel { max-height: calc(100vh - 90px); }
-            .avatar-lightbox { padding: 1rem; }
-            .avatar-lightbox-card { padding: 1.65rem 1.25rem 1.25rem; border-radius: 20px; }
-            .avatar-lightbox-media { width: 170px; height: 170px; font-size: 3.75rem; }
-            .avatar-lightbox-actions .avatar-lightbox-btn { flex: 1 1 auto; }
+            .logout-modal-actions { flex-direction: column-reverse; }
+            .logout-btn { width: 100%; }
         }
 
         @media (prefers-reduced-motion: reduce) {
             .panel, .user-chip, .user-chip .uc-chev, .icon-btn, .pp-avatar,
             .pp-camera, .pp-action, .np-icon, .notif-count, .avatar-lightbox,
             .avatar-lightbox-card, .avatar-lightbox-close, .avatar-lightbox-btn,
-            .cmdk-overlay, .cmdk, .quick-btn, .search-trigger {
+            .cmdk-overlay, .cmdk, .quick-btn, .search-trigger, .search-inline,
+            .logout-modal.show, .logout-modal-card {
                 animation: none !important; transition: none !important;
             }
         }
@@ -1083,7 +1193,7 @@ $hasAvatar     = !empty($headerAvatarUrl);
 
     <?php if (isset($extraStyles)) echo $extraStyles; ?>
 
-    <script src="includes/poller.js" defer></script>
+    <script src="includes/poller.js"></script>
     <?php /* pdf.js removed from <head>: it blocked first paint on every page and
            hit the cdnjs CDN per request. footer.php lazy-loads the self-hosted
            copy (offline/pdf.min.js) only when the preview modal opens. */ ?>
@@ -1153,13 +1263,20 @@ $hasAvatar     = !empty($headerAvatarUrl);
                     </div>
                 </div>
 
-                <!-- CENTER: search / command palette trigger -->
-                <button type="button" class="search-trigger" id="searchTrigger"
-                        aria-label="Open search (Ctrl+K)">
-                    <?= render_icon('search') ?>
-                    <span class="st-label"><?= (strtolower((string)($headerUserRole ?? '')) === 'staff') ? 'Search task' : 'Search documents, users, pages…' ?></span>
-                    <kbd><span id="cmdkHintMod">Ctrl</span>K</kbd>
-                </button>
+                <!-- CENTER: inline search -->
+                <div class="search-inline" id="searchInline" data-search-url="global_search.php">
+                    <div class="search-trigger" id="searchTriggerWrap" role="search">
+                        <?= render_icon('search') ?>
+                        <input type="text" class="search-input" id="headerSearchInput"
+                               placeholder="<?= (strtolower((string)($headerUserRole ?? '')) === 'staff') ? 'Search task' : 'Search documents, users, pages…' ?>"
+                               autocomplete="off" spellcheck="false"
+                               aria-label="Search"
+                               aria-controls="headerSearchDropdown"
+                               aria-expanded="false">
+                        
+                    </div>
+                    <div class="search-dropdown" id="headerSearchDropdown" role="listbox" aria-label="Search results"></div>
+                </div>
 
                 <!-- RIGHT: actions -->
                 <div class="appbar-right">
@@ -1178,7 +1295,7 @@ $hasAvatar     = !empty($headerAvatarUrl);
                         <?php endif; ?>
                     </button>
 
-                    <script src="includes/websocket_client.js" nonce="<?= csp_nonce() ?>"></script>
+                    <script src="includes/websocket_client.js?v=20261109" nonce="<?= csp_nonce() ?>"></script>
 
                     <button type="button" class="user-chip" id="userMenuBtn"
                             aria-haspopup="true" aria-expanded="false" aria-controls="profileDropdown">
@@ -1329,7 +1446,7 @@ $hasAvatar     = !empty($headerAvatarUrl);
                                     $timeUnix = $n['created_at'] && $n['created_at'] !== '0000-00-00 00:00:00' ? strtotime($n['created_at']) : 0;
                                     $time = $timeUnix > 0 ? "<span class=\"relative-time\" data-timestamp=\"$timeUnix\">" . timeAgo($n['created_at']) . "</span>" : 'Just now';
 
-                                    echo "<a href='notifications.php' class='np-item $unreadClass' data-unread='$isUnreadData'>
+                                    echo "<a href='notifications.php' class='np-item $unreadClass' data-unread='$isUnreadData' data-notification-id='{$n['id']}'>
                                             <span class='np-icon $iconClass'>" . render_icon($iconName) . "</span>
                                             <div class='np-content'>
                                                 <div class='np-item-title'>$title</div>
@@ -1357,7 +1474,28 @@ $hasAvatar     = !empty($headerAvatarUrl);
         </header>
 
         <!-- ============================================================
-             COMMAND PALETTE
+             LOGOUT CONFIRMATION MODAL (shared: every role/page)
+             ============================================================ -->
+        <div id="logoutConfirmModal" class="logout-modal" role="dialog" aria-modal="true"
+             aria-hidden="true" aria-labelledby="logoutConfirmTitle" aria-describedby="logoutConfirmMsg">
+            <div class="logout-modal-card">
+                <div class="logout-modal-head">
+                    <span class="logout-modal-icon" aria-hidden="true"><?= render_icon('logout') ?></span>
+                    <h2 id="logoutConfirmTitle">Confirm Logout</h2>
+                </div>
+                <div class="logout-modal-body">
+                    <p id="logoutConfirmMsg">Are you sure you want to log out of your account?</p>
+                </div>
+                <form method="POST" action="logout.php" id="logoutConfirmForm" class="logout-modal-actions">
+                    <?= function_exists('csrfField') ? csrfField() : '' ?>
+                    <button type="button" class="logout-btn logout-btn-cancel" id="logoutCancelBtn">Cancel</button>
+                    <button type="submit" class="logout-btn logout-btn-confirm" id="logoutConfirmBtn">Yes, Logout</button>
+                </form>
+            </div>
+        </div>
+
+        <!-- ============================================================
+             COMMAND PALETTE (kept for Ctrl+K; no longer opened by the header search)
              ============================================================ -->
         <?php
         $cmdkRole = strtolower((string)$headerUserRole);
@@ -1493,7 +1631,6 @@ $hasAvatar     = !empty($headerAvatarUrl);
     var lastFocusedEl = null;
 
     /* Command palette */
-    var searchTrigger = document.getElementById('searchTrigger');
     var cmdkOverlay   = document.getElementById('cmdkOverlay');
     var cmdkInput     = document.getElementById('cmdkInput');
     var cmdkList      = document.getElementById('cmdkList');
@@ -1590,11 +1727,20 @@ $hasAvatar     = !empty($headerAvatarUrl);
                 if (badge) badge.remove();
                 var dot = document.querySelector('.np-dot');
                 if (dot) dot.remove();
+                // Keep the notifications.php card count in sync too.
+                var cardBadge = document.querySelector('.card-header .badge');
+                if (cardBadge && cardBadge.textContent.indexOf('unread') !== -1) {
+                    cardBadge.textContent = count + ' unread';
+                    cardBadge.className = count > 0 ? 'badge badge-submitted' : 'badge badge-pending';
+                }
                 markAllBtn.remove();
                 refreshNotifCounts();
                 // Sync header session cache by forcing a fresh count fetch
                 var tabUnread = document.getElementById('tabCountUnread');
                 if (tabUnread) tabUnread.textContent = count;
+                if (window.CHED && CHED.WebSocketClient && CHED.WebSocketClient.setCount) {
+                    CHED.WebSocketClient.setCount(count);
+                }
             })
             .catch(function (err) { console.error('notif sync failed, retrying:', err); setTimeout(function () { fetch('notifications.php', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'action=mark_all_read&csrf_token=' + encodeURIComponent((document.querySelector('meta[name="csrf-token"]') || {getAttribute:function(){return'';}}).getAttribute('content')) }); }, 500); var badge=document.getElementById('notifCountBadge'); if(badge) badge.remove(); var dot=document.querySelector('.np-dot'); if(dot) dot.remove(); refreshNotifCounts(); var tabUnread=document.getElementById('tabCountUnread'); if(tabUnread) tabUnread.textContent='0'; /* shortcut: one retry; ceiling: brief server failure leaves session stale */ });
         });
@@ -1671,7 +1817,154 @@ $hasAvatar     = !empty($headerAvatarUrl);
         });
     }
 
-    /* ---------- COMMAND PALETTE ---------- */
+    /* ============================================================
+       INLINE HEADER SEARCH  (replaces the old trigger→modal wiring)
+       ============================================================ */
+    var searchInline   = document.getElementById('searchInline');
+    var searchInput    = document.getElementById('headerSearchInput');
+    var searchClear    = document.getElementById('headerSearchClear');
+    var searchDropdown = document.getElementById('headerSearchDropdown');
+    var searchWrap     = document.getElementById('searchTriggerWrap');
+    var inlineSearchUrl = searchInline ? searchInline.getAttribute('data-search-url') : null;
+
+    var inlineTimer = null;
+    var inlineSeq   = 0;
+    var inlineIndex = -1;
+
+    function isMobileSearch() {
+        return window.matchMedia('(max-width: 992px)').matches;
+    }
+    function openSearchDropdown() {
+        if (searchDropdown) searchDropdown.classList.add('show');
+        if (searchInput)    searchInput.setAttribute('aria-expanded', 'true');
+    }
+    function closeSearchDropdown() {
+        if (searchDropdown) searchDropdown.classList.remove('show');
+        if (searchInput)    searchInput.setAttribute('aria-expanded', 'false');
+        inlineIndex = -1;
+    }
+    function clearInlineResults() {
+        if (!searchDropdown) return;
+        searchDropdown.innerHTML = '';
+        closeSearchDropdown();
+    }
+    function escInline(s) {
+        var d = document.createElement('div');
+        d.textContent = s == null ? '' : String(s);
+        return d.innerHTML;
+    }
+    function renderInlineResults(data) {
+        if (!searchDropdown) return;
+        var html = '', n = 0;
+        (data.groups || []).forEach(function (g) {
+            if (!g.items || !g.items.length) return;
+            html += '<div class="cmdk-group-label">' + escInline(g.label) + '</div>';
+            g.items.forEach(function (it) {
+                n++;
+                html += '<a class="cmdk-item" href="' + escInline(it.url) + '">' +
+                        escInline(it.title) +
+                        (it.hint ? '<span class="cmdk-hint">' + escInline(it.hint) + '</span>' : '') +
+                        '</a>';
+            });
+        });
+        if (!n) {
+            searchDropdown.innerHTML = '<div class="cmdk-empty">No results found</div>';
+            openSearchDropdown();
+            return;
+        }
+        searchDropdown.innerHTML = html;
+        openSearchDropdown();
+        inlineIndex = -1;
+    }
+    function runInlineSearch(q) {
+        q = (q || '').trim();
+        clearTimeout(inlineTimer);
+        if (!inlineSearchUrl || q.length < 2) { clearInlineResults(); return; }
+        var seq = ++inlineSeq;
+        inlineTimer = setTimeout(function () {
+            fetch(inlineSearchUrl + '?q=' + encodeURIComponent(q), {
+                headers: { 'X-Requested-With': 'XMLHttpRequest' }
+            })
+            .then(function (r) { return r.json(); })
+            .then(function (data) { if (seq === inlineSeq) renderInlineResults(data); })
+            .catch(function () { /* silent: keep prior results */ });
+        }, 200);
+    }
+    function inlineItems() {
+        return searchDropdown
+            ? Array.prototype.slice.call(searchDropdown.querySelectorAll('.cmdk-item'))
+            : [];
+    }
+    function highlightInline(dir) {
+        var items = inlineItems();
+        if (!items.length) return;
+        items.forEach(function (i) { i.classList.remove('is-active'); });
+        inlineIndex += dir;
+        if (inlineIndex < 0) inlineIndex = items.length - 1;
+        if (inlineIndex >= items.length) inlineIndex = 0;
+        items[inlineIndex].classList.add('is-active');
+        items[inlineIndex].scrollIntoView({ block: 'nearest' });
+    }
+
+    if (searchInput) {
+        searchInput.addEventListener('input', function () {
+            if (searchClear) searchClear.hidden = !searchInput.value;
+            runInlineSearch(searchInput.value);
+        });
+        searchInput.addEventListener('focus', function () {
+            if (searchInput.value.trim().length >= 2 && searchDropdown && searchDropdown.innerHTML) {
+                openSearchDropdown();
+            }
+        });
+        searchInput.addEventListener('keydown', function (e) {
+            if (e.key === 'ArrowDown') { e.preventDefault(); highlightInline(1); }
+            else if (e.key === 'ArrowUp') { e.preventDefault(); highlightInline(-1); }
+            else if (e.key === 'Escape') { closeSearchDropdown(); searchInput.blur(); }
+            else if (e.key === 'Enter') {
+                var active = searchDropdown && searchDropdown.querySelector('.cmdk-item.is-active');
+                var items  = inlineItems();
+                var target = active || (items.length ? items[0] : null);
+                if (target && target.href) { window.location.href = target.href; }
+            }
+        });
+    }
+
+    if (searchClear) {
+        searchClear.addEventListener('click', function (e) {
+            e.stopPropagation();
+            if (searchInput) { searchInput.value = ''; searchInput.focus(); }
+            searchClear.hidden = true;
+            clearInlineResults();
+        });
+    }
+
+    /* Clicking anywhere on the pill focuses the input (expands it on mobile first) */
+    if (searchWrap) {
+        searchWrap.addEventListener('click', function (e) {
+            if (searchClear && (e.target === searchClear || searchClear.contains(e.target))) return;
+            if (isMobileSearch() && searchInline && !searchInline.classList.contains('is-expanded')) {
+                searchInline.classList.add('is-expanded');
+            }
+            if (searchInput && document.activeElement !== searchInput) searchInput.focus();
+        });
+    }
+
+    /* Outside click closes the inline dropdown + collapses mobile pill if empty */
+    document.addEventListener('click', function (e) {
+        if (!searchInline) return;
+        if (!searchInline.contains(e.target)) {
+            closeSearchDropdown();
+            if (isMobileSearch() && (!searchInput || !searchInput.value)) {
+                searchInline.classList.remove('is-expanded');
+            }
+        }
+    });
+    window.addEventListener('resize', function () {
+        if (!searchInline) return;
+        if (!isMobileSearch()) searchInline.classList.remove('is-expanded');
+    });
+
+    /* ---------- COMMAND PALETTE (Ctrl+K only; no trigger button) ---------- */
     var cmdkItems = [];
     function collectCmdkItems() {
         cmdkItems = Array.prototype.slice.call(document.querySelectorAll('#cmdkList .cmdk-item, #cmdkResults .cmdk-item'));
@@ -1724,7 +2017,7 @@ $hasAvatar     = !empty($headerAvatarUrl);
         visible[highlightIndex].scrollIntoView({ block: 'nearest' });
     }
 
-    /* ---------- Server search: approved documents (repository + archive) + program heads ---------- */
+    /* ---------- Server search for the palette (unchanged) ---------- */
     var cmdkUrl   = cmdkResults ? cmdkResults.getAttribute('data-search-url') : null;
     var cmdkTimer = null;
     var cmdkSeq   = 0;
@@ -1738,7 +2031,7 @@ $hasAvatar     = !empty($headerAvatarUrl);
         if (!cmdkResults) return;
         cmdkResults.innerHTML = '';
         cmdkResults.style.display = 'none';
-        cmdkList.style.display = '';
+        if (cmdkList) cmdkList.style.display = '';
         collectCmdkItems();
     }
     function renderCmdkResults(data) {
@@ -1758,7 +2051,7 @@ $hasAvatar     = !empty($headerAvatarUrl);
         cmdkResults.innerHTML = html;
         if (n) {
             cmdkResults.style.display = '';
-            cmdkList.style.display = 'none';
+            if (cmdkList) cmdkList.style.display = 'none';
             if (cmdkEmpty) cmdkEmpty.style.display = 'none';
         } else {
             clearCmdkResults();
@@ -1781,12 +2074,6 @@ $hasAvatar     = !empty($headerAvatarUrl);
         }, 200);
     }
 
-    if (searchTrigger) {
-        searchTrigger.addEventListener('click', function (e) {
-            e.stopPropagation();
-            openCmdk();
-        });
-    }
     if (cmdkInput) {
         cmdkInput.addEventListener('input', function () {
             filterCmdk(cmdkInput.value);
@@ -1811,7 +2098,7 @@ $hasAvatar     = !empty($headerAvatarUrl);
 
     /* ---------- Global key handling ---------- */
     document.addEventListener('keydown', function (e) {
-        /* Ctrl/Cmd + K → command palette */
+        /* Ctrl/Cmd + K → command palette (unchanged) */
         if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
             e.preventDefault();
             if (cmdkOverlay && cmdkOverlay.classList.contains('show')) closeCmdk();
@@ -1821,11 +2108,12 @@ $hasAvatar     = !empty($headerAvatarUrl);
         if (e.key === 'Escape') {
             if (cmdkOverlay && cmdkOverlay.classList.contains('show')) { closeCmdk(); return; }
             if (lightbox && lightbox.classList.contains('show')) { closeLightbox(); return; }
+            if (searchDropdown && searchDropdown.classList.contains('show')) { closeSearchDropdown(); return; }
             closeAllPanels();
         }
     });
 
-    /* Show correct modifier hint on Mac */
+    /* Show correct modifier hint on Mac (only if a hint element exists) */
     if (navigator.platform && /Mac|iPhone|iPad/.test(navigator.platform)) {
         var modHint = document.getElementById('cmdkHintMod');
         if (modHint) modHint.textContent = '⌘';

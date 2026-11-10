@@ -771,13 +771,13 @@ include 'includes/header.php';
 
                     <div class="form-group">
                         <label>Full Name <span class="required-mark">*</span></label>
-                        <input type="text" name="name" class="form-control" required placeholder="Enter full name"
+                        <input type="text" name="name" class="form-control" required autocomplete="name" placeholder="Enter full name"
                             value="<?= sanitize($editUser['name'] ?? '') ?>">
                     </div>
 
                     <div class="form-group">
                         <label>Email Address <span class="required-mark">*</span></label>
-                        <input type="email" name="email" class="form-control" required placeholder="name@institution.edu"
+                        <input type="email" name="email" class="form-control" required autocomplete="email" placeholder="name@institution.edu"
                             value="<?= sanitize($editUser['email'] ?? '') ?>">
                     </div>
 

@@ -17,7 +17,7 @@ if (!defined('CHED_APP')) exit;
 <!-- ═══════════════════════════════════════════════════════════════
      SECTION 2 · GLOBAL SCRIPTS
      ═══════════════════════════════════════════════════════════════ -->
-<script src="includes/sidebar.js?v=20261013" defer></script>
+<script src="includes/sidebar.js?v=20261109" defer></script>
 <script src="includes/csp-events.js" defer></script>
 <?php if (isset($extraScripts)) echo $extraScripts; ?>
 
@@ -644,8 +644,8 @@ document.addEventListener('DOMContentLoaded', function () {
     if (currentDocId !== expectedDocId) return;
     currentType = type;
 
-    const cb  = '_t=' + Date.now() + '_' + Math.random().toString(36).substring(2);
-    const url = previewUrl + (previewUrl.indexOf('?') !== -1 ? '&' : '?') + cb;
+    // Server-side now uses ETag + Cache-Control; no client-side cache-buster needed.
+    const url = previewUrl;
 
     // ── PDF ────────────────────────────────────────────────────
     if (type === 'pdf') {
@@ -755,7 +755,7 @@ document.addEventListener('DOMContentLoaded', function () {
     openFocus();
 
     const previewUrl  = 'preview.php?id=' + encodeURIComponent(docId) + '&source=' + encodeURIComponent(source);
-    const downloadUrl = 'download_document.php?id=' + encodeURIComponent(docId) + '&source=' + encodeURIComponent(source);
+    const downloadUrl = 'preview.php?id=' + encodeURIComponent(docId) + '&source=' + encodeURIComponent(source) + '&download=1';
     downloadBtn.href = downloadUrl;
 
     detectAndOpen(docId, title, source, downloadUrl, extension, previewUrl);

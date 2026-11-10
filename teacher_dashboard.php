@@ -1297,6 +1297,41 @@ ob_start();
         background: var(--primary-dark);
     }
 
+    /* ============================================================
+       Upload button loading state
+       ============================================================ */
+    @keyframes btnSpin {
+        to {
+            transform: rotate(360deg);
+        }
+    }
+
+    .btn-spinner {
+        display: inline-block;
+        width: 14px;
+        height: 14px;
+        border: 2px solid currentColor;
+        border-right-color: transparent;
+        border-radius: 50%;
+        animation: btnSpin 0.6s linear infinite;
+        flex-shrink: 0;
+    }
+
+    .btn-spinner[hidden] {
+        display: none;
+    }
+
+    .btn.is-loading {
+        opacity: 0.85;
+        cursor: not-allowed;
+        pointer-events: none;
+    }
+
+    .btn.is-loading:hover {
+        transform: none;
+        box-shadow: 0 1px 2px rgba(37, 99, 235, 0.25);
+    }
+
     .alert {
         padding: 0.9rem 1.15rem;
         border-radius: var(--radius-md);
@@ -1691,6 +1726,10 @@ ob_start();
         .req-card {
             animation: none !important;
             transition: none !important;
+        }
+
+        .btn-spinner {
+            animation: none !important;
         }
     }
 </style>
@@ -2101,7 +2140,10 @@ include 'includes/header.php'; ?>
                     <textarea name="comment" class="form-control" rows="3" placeholder="Any notes about this submission..."></textarea>
                 </div>
                 <div style="display:flex; gap:0.75rem; justify-content:flex-end;">
-                    <button type="submit" class="btn btn-primary" id="uploadBtn">Upload</button>
+                    <button type="submit" class="btn btn-primary" id="uploadBtn">
+                        <span class="btn-spinner" id="uploadBtnSpinner" hidden aria-hidden="true"></span>
+                        <span id="uploadBtnText">Upload</span>
+                    </button>
                 </div>
             </form>
         </div>
@@ -2292,9 +2334,18 @@ include 'includes/header.php'; ?>
     document.getElementById('uploadForm')?.addEventListener('submit', function(e) {
         e.preventDefault();
         const btn = document.getElementById('uploadBtn');
+        // Guard against a second submit (e.g. Enter key in the comment field)
+        // while a previous upload is still in flight.
+        if (btn.disabled) return;
+
+        const btnText = document.getElementById('uploadBtnText');
+        const btnSpinner = document.getElementById('uploadBtnSpinner');
         const form = this;
         const fileInput = form.querySelector('input[type="file"]');
         const f = fileInput && fileInput.files[0];
+
+        // Client-side size check — run before showing the loader so an
+        // oversized file doesn't flash the loading state needlessly.
         if (f) {
             const isImg = /\.(jpe?g|png|gif|webp)$/i.test(f.name);
             if (f.size > (isImg ? 10 : 100) * 1024 * 1024) {
@@ -2302,11 +2353,25 @@ include 'includes/header.php'; ?>
                 return;
             }
         }
-        btn.textContent = 'Uploading...';
+
+        // --- Show loading state immediately ---
+        const originalText = btnText.textContent;
+        btnText.textContent = 'Uploading...';
+        btnSpinner.hidden = false;
         btn.disabled = true;
+        btn.classList.add('is-loading');
+
+        function restoreButton() {
+            btnText.textContent = originalText;
+            btnSpinner.hidden = true;
+            btn.disabled = false;
+            btn.classList.remove('is-loading');
+        }
+
         const formData = new FormData(form);
         formData.append('ajax_upload', '1');
         if (!formData.has('csrf_token')) formData.append('csrf_token', csrfToken);
+
         fetch(window.location.href, {
                 method: 'POST',
                 body: formData,
@@ -2321,18 +2386,18 @@ include 'includes/header.php'; ?>
             })
             .then(data => {
                 if (data.success) {
+                    // Keep the spinner visible until the page reloads so the
+                    // user sees continuous feedback on success.
                     document.getElementById('uploadModal').classList.remove('show');
                     showToast(data.message, 'success');
                     setTimeout(() => location.reload(), 1500);
                 } else {
-                    btn.textContent = 'Upload';
-                    btn.disabled = false;
+                    restoreButton();
                     showToast(data.message, 'error');
                 }
             })
             .catch(error => {
-                btn.textContent = 'Upload';
-                btn.disabled = false;
+                restoreButton();
                 showToast('Upload failed: ' + error.message, 'error');
             });
     });

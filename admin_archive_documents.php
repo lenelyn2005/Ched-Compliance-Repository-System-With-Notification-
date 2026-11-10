@@ -990,6 +990,7 @@ include 'includes/header.php';
                 <input type="hidden" name="dept" value="<?= $filterDept ?>">
                 <input type="hidden" name="folder" value="<?= $selectedFolder ?>">
                 <?= csrfField() ?>
+                <input type="text" name="username" autocomplete="username" value="<?= sanitize($_SESSION['user_name'] ?? '') ?>" style="display:none" tabindex="-1" aria-hidden="true">
                 <label for="deleteAdminPassword" style="display:block;margin-bottom:.4rem;font-size:.82rem;font-weight:600;color:var(--gray-600);">Confirm your admin password</label>
                 <input type="password" id="deleteAdminPassword" name="admin_password" autocomplete="current-password" required style="margin-bottom:1rem;width:100%;padding:.65rem .85rem;border:1px solid var(--border);border-radius:8px;font-family:inherit;font-size:.875rem;">
                 <div style="display: flex; gap: .75rem; justify-content: flex-end;">

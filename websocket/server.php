@@ -1,10 +1,19 @@
 <?php
+// Entry point is CLI-only; via Apache it would bind the WS ports inside a
+// web worker and hang the request (or steal the ports from the real server).
+if (PHP_SAPI !== 'cli') {
+    http_response_code(403);
+    exit('Forbidden');
+}
 require __DIR__ . '/../vendor/autoload.php';
 use Ratchet\Server\IoServer;
 use Ratchet\Http\HttpServer;
 use Ratchet\WebSocket\WsServer;
 
 require_once __DIR__ . '/../config.php';
+
+// Ratchet 0.4.4 uses dynamic properties (deprecated in PHP 8.2); keep startup clean.
+error_reporting(E_ALL & ~E_DEPRECATED);
 
 class NotificationServer implements \Ratchet\MessageComponentInterface
 {
@@ -93,10 +102,13 @@ class NotificationServer implements \Ratchet\MessageComponentInterface
                         $delivered = true;
                     }
                 }
+                // shortcut: delivered items drain here (DB keeps the record for badge/history);
+                // keep only undelivered for retry. upgrade to DB outbox with retry count and expiry.
+                if (!$delivered) {
+                    $newItems[] = $item;
+                }
             }
-            // If not delivered or user not connected, keep for retry
-            // shortcut: outbox event kept until delivered or manual cleanup; upgrade to DB outbox with retry count and expiry.
-            $newItems[] = $item;
+            // Notification row gone: drop the item, nothing to deliver.
         }
         @file_put_contents($file, json_encode($newItems), LOCK_EX);
     }

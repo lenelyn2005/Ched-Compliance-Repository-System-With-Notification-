@@ -147,17 +147,126 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['delete_all_au
     exit;
 }
 
+// Human-readable labels used for the "Affected Record" fallback text.
+$auditRecordTypeLabels = [
+    'user' => 'User',
+    'document' => 'Document',
+    'documents' => 'Document',
+    'ph_document' => 'Document',
+    'ph_documents' => 'Document',
+    'department' => 'Department',
+    'department_requirement' => 'Requirement',
+    'department_requirements' => 'Requirement',
+    'department_folders' => 'Folder',
+    'ph_requirement' => 'Requirement',
+    'ph_repository' => 'Document',
+    'ph_repo_folders' => 'Folder',
+    'teacher_ph_requirements' => 'Requirement',
+    'teacher_requirement' => 'Requirement',
+    'teacher_requirements' => 'Requirement',
+    'ched_share_link' => 'Share link',
+    'upload' => 'Document',
+];
+
+// Resolve the display name for each affected record in the current page of
+// logs. Names are fetched in batch (one query per entity type) so rendering
+// never issues a query per row.
+function resolveAuditRecordNames(PDO $pdo, array $logs): array
+{
+    $groups = [];
+    foreach ($logs as $log) {
+        $type = (string)($log['entity_type'] ?? '');
+        $id = (int)($log['entity_id'] ?? 0);
+        if ($type === '' || $id <= 0) {
+            continue;
+        }
+        $groups[$type][$id] = true;
+    }
+
+    $names = [];
+    foreach ($groups as $type => $ids) {
+        $idList = implode(',', array_map('intval', array_keys($ids)));
+        switch ($type) {
+            case 'user':
+                $sql = "SELECT id, name AS label FROM users WHERE id IN ($idList)";
+                break;
+            case 'document':
+            case 'documents':
+            case 'upload':
+                $sql = "SELECT id, COALESCE(NULLIF(title, ''), filename) AS label FROM documents WHERE id IN ($idList)";
+                break;
+            case 'ph_document':
+            case 'ph_documents':
+                $sql = "SELECT id, title AS label FROM ph_documents WHERE id IN ($idList)";
+                break;
+            case 'department':
+                $sql = "SELECT id, department_name AS label FROM departments WHERE id IN ($idList)";
+                break;
+            case 'department_requirement':
+            case 'department_requirements':
+                $sql = "SELECT id, CONCAT(category, ' — ', document_type) AS label FROM department_requirements WHERE id IN ($idList)";
+                break;
+            case 'department_folders':
+                $sql = "SELECT id, folder_name AS label FROM department_folders WHERE id IN ($idList)";
+                break;
+            case 'ph_requirement':
+                $sql = "SELECT id, title AS label FROM ph_requirements WHERE id IN ($idList)";
+                break;
+            case 'ph_repository':
+                $sql = "SELECT id, title AS label FROM ph_repository WHERE id IN ($idList)";
+                break;
+            case 'ph_repo_folders':
+                $sql = "SELECT id, folder_name AS label FROM ph_repo_folders WHERE id IN ($idList)";
+                break;
+            case 'teacher_ph_requirements':
+                $sql = "SELECT t.id, pr.title AS label
+                        FROM teacher_ph_requirements t
+                        LEFT JOIN ph_requirements pr ON pr.id = t.ph_requirement_id
+                        WHERE t.id IN ($idList)";
+                break;
+            case 'teacher_requirement':
+            case 'teacher_requirements':
+                $sql = "SELECT t.id,
+                               CASE t.requirement_type
+                                   WHEN 'program_head_requirement'
+                                       THEN (SELECT pr.title FROM ph_requirements pr WHERE pr.id = t.requirement_id)
+                                   ELSE (SELECT CONCAT(dr.category, ' — ', dr.document_type) FROM department_requirements dr WHERE dr.id = t.requirement_id)
+                               END AS label
+                        FROM teacher_requirements t
+                        WHERE t.id IN ($idList)";
+                break;
+            case 'ched_share_link':
+                $sql = "SELECT c.id, COALESCE(df.folder_name, d.department_name, 'All departments') AS label
+                        FROM ched_share_links c
+                        LEFT JOIN department_folders df ON df.id = c.folder_id
+                        LEFT JOIN departments d ON d.id = c.department_id
+                        WHERE c.id IN ($idList)";
+                break;
+            default:
+                $sql = null;
+        }
+        if ($sql === null) {
+            continue;
+        }
+        try {
+            foreach ($pdo->query($sql)->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                $label = isset($row['label']) ? trim((string)$row['label']) : '';
+                if ($label !== '') {
+                    $names[$type][(int)$row['id']] = $label;
+                }
+            }
+        } catch (Exception $e) {
+            // Leave unresolved so the renderer falls back to "Deleted ...".
+        }
+    }
+
+    return $names;
+}
+
 $page = max(1, (int)($_GET['page'] ?? 1));
 $perPage = 50;
 $offset = ($page - 1) * $perPage;
-$filterAction = $_GET['action'] ?? '';
-$filterUser = !empty($_GET['user']) ? (int)$_GET['user'] : null;
-
-$filterRole = $_GET['role'] ?? '';
-$filterDept = !empty($_GET['dept']) ? (int)$_GET['dept'] : null;
-$filterDateFrom = $_GET['date_from'] ?? '';
-$filterDateTo = $_GET['date_to'] ?? '';
-$filterKeyword = $_GET['keyword'] ?? '';
+$filterSearch = trim((string)($_GET['q'] ?? ''));
 
 // Build conditions for WHERE clause.
 // Super Admin reads ONLY its own protected archive scope. Admin deletions
@@ -165,39 +274,11 @@ $filterKeyword = $_GET['keyword'] ?? '';
 $conditions = ["a.trail_scope = 'super_admin'"];
 $params = [];
 
-if (!empty($filterAction)) {
-    $conditions[] = 'a.action LIKE ?';
-    $params[] = '%' . $filterAction . '%';
-}
-
-if ($filterUser !== null) {
-    $conditions[] = 'a.user_id = ?';
-    $params[] = $filterUser;
-}
-
-if (!empty($filterRole)) {
-    $conditions[] = 'u.role = ?';
-    $params[] = $filterRole;
-}
-
-if ($filterDept !== null) {
-    $conditions[] = 'u.department_id = ?';
-    $params[] = $filterDept;
-}
-
-if (!empty($filterKeyword)) {
-    $conditions[] = '(a.action LIKE ? OR a.description LIKE ? OR a.entity_type LIKE ?)';
-    $kw = '%' . $filterKeyword . '%';
-    $params[] = $kw; $params[] = $kw; $params[] = $kw;
-}
-
-if (!empty($filterDateFrom)) {
-    $conditions[] = 'DATE(a.created_at) >= ?';
-    $params[] = $filterDateFrom;
-}
-if (!empty($filterDateTo)) {
-    $conditions[] = 'DATE(a.created_at) <= ?';
-    $params[] = $filterDateTo;
+// Single search bar: match action, description, entity type, user, role and department.
+if ($filterSearch !== '') {
+    $kw = '%' . $filterSearch . '%';
+    $conditions[] = '(a.action LIKE ? OR a.description LIKE ? OR a.entity_type LIKE ? OR u.name LIKE ? OR u.role LIKE ? OR d.department_name LIKE ?)';
+    $params = array_merge($params, [$kw, $kw, $kw, $kw, $kw, $kw]);
 }
 
 // Build WHERE clause
@@ -231,9 +312,8 @@ $logs = $pdo->prepare($sql);
 $logs->execute($params);
 $logs = $logs->fetchAll();
 
-$allUsers = $pdo->query("SELECT id, name FROM users ORDER BY name")->fetchAll();
-$allRoles = $pdo->query("SELECT DISTINCT role FROM users WHERE role IS NOT NULL AND role != '' ORDER BY role")->fetchAll();
-$allDepts = $pdo->query("SELECT id, department_name FROM departments ORDER BY department_name")->fetchAll();
+// Resolve meaningful names for the "Affected Record" column in batch.
+$affectedRecordNames = resolveAuditRecordNames($pdo, $logs);
 
 $pageTitle = 'Super Admin Audit Trail';
 
@@ -746,54 +826,15 @@ include 'includes/header.php';
     <?php endif; ?>
 
 
-    <!-- Filter Card -->
+    <!-- Search -->
     <div class="filter-card">
         <form method="GET" class="filter-form">
             <div class="filter-group">
-                <label>Keyword</label>
-                <input type="text" name="keyword" class="form-control" value="<?= htmlspecialchars($filterKeyword) ?>" placeholder="Search action, description...">
-            </div>
-            <div class="filter-group">
-                <label>Action Type</label>
-                <input type="text" name="action" class="form-control" value="<?= htmlspecialchars($filterAction) ?>" placeholder="e.g. login, create, upload">
-            </div>
-            <div class="filter-group">
-                <label>User</label>
-                <select name="user" class="form-control">
-                    <option value="">All Users</option>
-                    <?php foreach ($allUsers as $u): ?>
-                        <option value="<?= $u['id'] ?>" <?= $filterUser == $u['id'] ? 'selected' : '' ?>><?= htmlspecialchars($u['name']) ?></option>
-                    <?php endforeach; ?>
-                </select>
-            </div>
-            <div class="filter-group">
-                <label>Role</label>
-                <select name="role" class="form-control">
-                    <option value="">All Roles</option>
-                    <?php foreach ($allRoles as $r): ?>
-                        <option value="<?= htmlspecialchars($r['role']) ?>" <?= $filterRole === $r['role'] ? 'selected' : '' ?>><?= htmlspecialchars(ucfirst(str_replace('_', ' ', $r['role']))) ?></option>
-                    <?php endforeach; ?>
-                </select>
-            </div>
-            <div class="filter-group">
-                <label>Department</label>
-                <select name="dept" class="form-control">
-                    <option value="">All Departments</option>
-                    <?php foreach ($allDepts as $d): ?>
-                        <option value="<?= $d['id'] ?>" <?= $filterDept == $d['id'] ? 'selected' : '' ?>><?= htmlspecialchars($d['department_name']) ?></option>
-                    <?php endforeach; ?>
-                </select>
-            </div>
-            <div class="filter-group">
-                <label>From Date</label>
-                <input type="date" name="date_from" class="form-control" value="<?= htmlspecialchars($filterDateFrom) ?>">
-            </div>
-            <div class="filter-group">
-                <label>To Date</label>
-                <input type="date" name="date_to" class="form-control" value="<?= htmlspecialchars($filterDateTo) ?>">
+                <label>Search</label>
+                <input type="text" name="q" class="form-control" value="<?= htmlspecialchars($filterSearch) ?>" placeholder="Search action, description, user, role, department...">
             </div>
             <div class="filter-actions">
-                <button type="submit" class="btn btn-primary">Filter</button>
+                <button type="submit" class="btn btn-primary">Search</button>
                 <a href="super_admin_audit_trail.php" class="btn btn-secondary">Reset</a>
             </div>
         </form>
@@ -815,7 +856,7 @@ include 'includes/header.php';
                 <!-- Pagination -->
                 <div class="pagination-wrapper">
                 <?php
-                $baseUrl = '?action=' . urlencode($filterAction) . '&user=' . $filterUser . '&role=' . urlencode($filterRole) . '&dept=' . $filterDept . '&date_from=' . urlencode($filterDateFrom) . '&date_to=' . urlencode($filterDateTo) . '&keyword=' . urlencode($filterKeyword);
+                $baseUrl = '?q=' . urlencode($filterSearch);
                 if ($page > 1):
                 ?>
                     <a href="<?= $baseUrl ?>&page=<?= $page-1 ?>" class="btn btn-sm btn-outline">Prev</a>
@@ -871,18 +912,43 @@ include 'includes/header.php';
                                 $roleKey = (string)($log['role'] ?? '');
                                 $roleLabel = match ($roleKey) {
                                     '', null => 'System',
+                                    'super_admin' => 'Super Admin',
                                     'admin' => 'Admin',
+                                    'department' => 'Department',
+                                    'unit_head' => 'Unit Head',
+                                    'program_head' => 'Program Head',
                                     'teacher' => 'Teacher',
                                     'staff' => 'Staff',
                                     default => phRoleName($roleKey),
                                 };
                                 $roleBadge = match ($roleKey) {
                                     '', null => 'badge-system',
+                                    'super_admin' => 'badge-approved',
                                     'admin' => 'badge-submitted',
                                     'department' => 'badge-approved',
                                     'unit_head' => 'badge-pending-ph',
+                                    'program_head' => 'badge-pending-ph',
                                     default => 'badge-pending',
                                 };
+
+                                // Display name: system entries show as "Visitor".
+                                $displayName = !empty($log['user_id'])
+                                    ? (($log['user_name'] ?? '') !== '' ? $log['user_name'] : 'Unknown User')
+                                    : 'Visitor';
+
+                                // Resolve the affected record's display name.
+                                $entityType = (string)($log['entity_type'] ?? '');
+                                $entityId = (int)($log['entity_id'] ?? 0);
+                                if ($entityType === '' || $entityId <= 0) {
+                                    $affectedLabel = '—';
+                                } else {
+                                    $resolvedName = $affectedRecordNames[$entityType][$entityId] ?? null;
+                                    if ($resolvedName === null || $resolvedName === '') {
+                                        $affectedLabel = 'Deleted ' . ($auditRecordTypeLabels[$entityType] ?? 'Record') . ' (ID: ' . $entityId . ')';
+                                    } else {
+                                        $affectedLabel = $resolvedName;
+                                    }
+                                }
                                 $description = (string)($log['description'] ?? '');
                                 $logIp = null;
                                 if (preg_match('/^(.*?)\s*\[ip=([^\]]+)\]$/', $description, $m)) {
@@ -900,7 +966,7 @@ include 'includes/header.php';
                                         <?php endif; ?>
                                     </td>
                                     <td>
-                                        <div class="font-semibold"><?= htmlspecialchars($log['user_name'] ?? '(System)') ?></div>
+                                        <div class="font-semibold"><?= htmlspecialchars($displayName) ?></div>
                                     </td>
                                     <td>
                                         <span class="badge <?= $roleBadge ?>"><?= htmlspecialchars($roleLabel) ?></span>
@@ -909,7 +975,7 @@ include 'includes/header.php';
                                     <td>
                                         <span class="badge <?= $badgeClass ?>"><?= strtoupper($log['action']) ?></span>
                                     </td>
-                                    <td class="text-xs"><?= htmlspecialchars(($log['entity_type'] ?? '') . ($log['entity_id'] ? '#' . $log['entity_id'] : '')) ?></td>
+                                    <td class="text-xs"><?= htmlspecialchars($affectedLabel) ?></td>
                                     <td style="font-size:0.875rem;line-height:1.4;">
                                         <?= htmlspecialchars($description) ?>
                                         <?php if ($logIp !== null): ?>

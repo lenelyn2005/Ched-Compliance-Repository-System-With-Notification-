@@ -113,9 +113,9 @@ if ($role === 'admin') {
         [
             'label' => 'Overview',
             'links' => [
-                ['href' => 'super_admin_dashboard.php', 'label' => 'Administrator Accounts', 'icon' => 'users', 'color' => 'primary'],
-                ['href' => 'admin_audit_trail.php', 'label' => 'Audit Trail', 'icon' => 'clock', 'color' => 'muted'],
-                ['href' => 'admin_settings.php', 'label' => 'System Settings', 'icon' => 'settings', 'color' => 'muted'],
+                ['href' => 'super_admin_dashboard.php', 'label' => 'Dashboard', 'icon' => 'dashboard', 'color' => 'primary'],
+                ['href' => 'super_admin_audit_trail.php', 'label' => 'Audit Trail', 'icon' => 'clock', 'color' => 'muted'],
+                ['href' => 'super_admin_settings.php', 'label' => 'Settings', 'icon' => 'settings', 'color' => 'muted'],
             ],
         ],
     ];

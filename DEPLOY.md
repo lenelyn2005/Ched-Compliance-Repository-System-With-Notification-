@@ -100,3 +100,19 @@ docker build -t ched .
 docker run --rm -p 10000:10000 --env-file .env -v "$PWD/ca.pem:/etc/secrets/ca.pem:ro" ched
 # open http://localhost:10000
 ```
+
+## Local XAMPP — realtime WebSocket server
+
+The WebSocket server (`websocket/server.php`) is a **separate process** next to
+Apache. Docker/Render start it via `docker/supervisord.conf`; on XAMPP the
+`CHED-WebSocket` scheduled task starts `websocket/supervisor.ps1` at logon and
+restarts it after a crash. Install it once from an elevated PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install_websocket_task.ps1
+```
+
+Remove it with the same command plus `-Remove`. For a one-off foreground run,
+use `start_websocket.bat` (Ctrl+C stops it). If the server is down, every page
+logs `WebSocket connection to 'ws://127.0.0.1:8080/' failed` — the client
+retries with backoff, and `logs/websocket.log` records supervisor restarts.

@@ -14,6 +14,11 @@
     Require all denied
 </FilesMatch>
 
+# WebSocket runtime state (outbox queue + used auth tickets) — filesystem access only
+<FilesMatch "^(pending|used_tickets)\.json$">
+    Require all denied
+</FilesMatch>
+
 <IfModule mod_rewrite.c>
     RewriteEngine On
     RewriteRule (^|/)\.git - [F,L]

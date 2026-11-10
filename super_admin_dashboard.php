@@ -350,12 +350,6 @@ include 'includes/header.php';
 ?>
 <div class="sad-wrap">
 
-    <div class="sad-head">
-        <div>
-            <h1 class="sad-title">Administrator Accounts</h1>
-            <p class="sad-sub">Create, review, and activate or deactivate Administrator accounts.</p>
-        </div>
-    </div>
 
     <?php if ($error): ?>
         <div class="sad-alert sad-alert-danger" role="alert" aria-live="assertive">

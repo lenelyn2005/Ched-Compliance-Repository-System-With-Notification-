@@ -35,20 +35,35 @@ set_time_limit(300);
 ini_set('memory_limit', '512M');
 
 // Helper to determine cache path
-// Keyed on the DB-relative document path only: an r2 object has no local file,
-// so mtime cannot participate. The relative path is stable across drivers and
-// unique per document, and a re-upload writes a new canonical filename, which
-// yields a fresh key just like the old mtime-based one did.
-// ponytail: a same-path overwrite would keep a stale preview; switch the key to
-// file_hash when that ever becomes possible.
-function getCachePath($filePath, $type) {
+// Keyed on file_hash when available; falls back to file_path.
+function getCachePath($filePath, $type, $fileHash = null, $ext = 'html') {
     $cacheDir = getPreviewCacheDir();
-    $key = md5((string) $filePath);
-    return $cacheDir . "{$key}_{$type}.html";
+    $key = $fileHash !== null ? md5($fileHash) : md5((string) $filePath);
+    return $cacheDir . "{$key}_{$type}.{$ext}";
 }
 
 $corr = 'p_' . uniqid();
 $t0 = microtime(true);
+
+// Simple timing log helper
+function logPreviewTiming(string $stage, float $tStart): void {
+    if (!defined('CHED_TIMING_ENABLED') || !CHED_TIMING_ENABLED) {
+        return;
+    }
+    $durationMs = (microtime(true) - $tStart) * 1000;
+    $log = [
+        't' => microtime(true),
+        'stage' => $stage,
+        'duration_ms' => round($durationMs, 2),
+        'mem_mb' => round(memory_get_peak_usage(true) / 1048576, 2),
+    ];
+    $logFile = TEMP_PATH . 'preview_timing_log.jsonl';
+    $dir = dirname($logFile);
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0755, true);
+    }
+    @file_put_contents($logFile, json_encode($log, JSON_UNESCAPED_SLASHES) . "\n", FILE_APPEND | LOCK_EX);
+}
 
 // Fetch document record
 $id = isset($_GET['id']) ? (int) $_GET['id'] : 0;
@@ -59,11 +74,16 @@ if (!$id || !$source) {
     die('Missing parameters');
 }
 
+// Periodic cache cleanup (probabilistic ~1% of requests to avoid overhead)
+if (mt_rand(1, 100) === 1) {
+    cleanupPreviewCache();
+}
+
 // SELECT column lists include archived (authorization no longer blocks non-admin on archived; history/notifications list them)
-$docCols = 'file_path, filename, uploaded_by, department_id, teacher_requirement_id, archived, status';
-$phDocCols = 'file_path, filename, uploaded_by, department_id, teacher_ph_requirement_id, archived, status';
-$reqCols = 'file_path, COALESCE(filename, title) as filename, created_by, department_id, 0 as archived';
-$repoCols = 'file_path, COALESCE(filename, title) as filename, program_head_id, department_id, ph_document_id, ph_requirement_id, document_id, 0 as archived';
+$docCols = 'file_path, filename, file_hash, uploaded_by, department_id, teacher_requirement_id, archived, status';
+$phDocCols = 'file_path, filename, file_hash, uploaded_by, department_id, teacher_ph_requirement_id, archived, status';
+$reqCols = 'file_path, COALESCE(filename, title) as filename, NULL as file_hash, created_by, department_id, 0 as archived';
+$repoCols = 'file_path, COALESCE(filename, title) as filename, file_hash, program_head_id, department_id, ph_document_id, ph_requirement_id, document_id, 0 as archived';
 
 // Handle download mode - force download
 if ($download) {
@@ -94,6 +114,8 @@ if ($download) {
             die('Invalid source');
     }
     
+    logPreviewTiming('db_lookup_complete', $t0);
+
     if (!$file) {
         http_response_code(404);
         die('Document not found');
@@ -144,7 +166,7 @@ if ($download) {
     $deptId = $_SESSION['department_id'] ?? null;
     $hasAccess = false;
 
-    if ($role === 'admin') {
+    if ($role === 'admin' || $role === 'super_admin') {
         $hasAccess = true;
     } elseif (in_array($role, ['department', 'unit_head'], true) && (($deptId && isset($file['department_id']) && (int)$file['department_id'] === (int)$deptId) || (isset($file['uploaded_by']) ? (int)$file['uploaded_by'] : (isset($file['created_by']) ? (int)$file['created_by'] : 0)) === $userId || ($source === 'ph_document' && !empty($file['teacher_ph_requirement_id'])))) {
         if ($source === 'ph_document' && !empty($file['teacher_ph_requirement_id'])) {
@@ -194,13 +216,17 @@ if ($download) {
     }
 
     if (!$hasAccess) {
+        logPreviewTiming('auth_denied', $t0);
         http_response_code(403);
         die('Access denied');
     }
     
+    logPreviewTiming('auth_complete', $t0);
+    
     $relPath = (string) $file['file_path'];
     // Only genuine absence is a 404; a storage outage is a 503, never a silent
     // "file not found" (plan §9).
+    $tMeta = microtime(true);
     try {
         $fileSize = storageObjectSize($relPath);
     } catch (StorageException $e) {
@@ -208,6 +234,7 @@ if ($download) {
         error_log('[CHED] preview download blocked, storage unavailable: ' . get_class($e));
         die('Storage temporarily unavailable. Please try again.');
     }
+    logPreviewTiming('r2_metadata', $tMeta);
     if ($fileSize === null) { http_response_code(404); die('File not found or unreadable'); }
     
     $ext = strtolower(pathinfo($file['filename'], PATHINFO_EXTENSION));
@@ -231,8 +258,23 @@ if ($download) {
     $mimeType = $mimeTypes[$ext] ?? 'application/octet-stream';
     header('Content-Type: ' . $mimeType);
     header('Content-Disposition: attachment; filename="' . rawurlencode($file['filename']) . '"');
-    header('Content-Length: ' . $fileSize);
-    storageEmitBody($relPath);
+    // Range + caching for downloads too
+    $etag = !empty($file['file_hash']) ? '"' . $file['file_hash'] . '"' : null;
+    if ($etag !== null) {
+        header('ETag: ' . $etag);
+        if (isset($_SERVER['HTTP_IF_NONE_MATCH']) && $_SERVER['HTTP_IF_NONE_MATCH'] === $etag) {
+            http_response_code(304);
+            exit;
+        }
+    }
+    header('Cache-Control: private, max-age=3600');
+    try {
+        storageEmitBodyRange($relPath);
+    } catch (StorageException $e) {
+        http_response_code(404);
+        error_log('[CHED] preview download blocked, storage unavailable: ' . get_class($e));
+        die('File not found or unreadable');
+    }
     exit;
 }
 
@@ -392,12 +434,18 @@ if (in_array($ext, ['pdf', 'jpg', 'jpeg', 'png', 'gif', 'webp'])) {
     while (ob_get_level()) ob_end_clean();
     header('Content-Type: ' . $mime);
     header('Content-Disposition: inline; filename="' . rawurlencode($file['filename']) . '"');
-    // shortcut: Content-Length omitted to eliminate duplicate R2 HEAD.
-    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
-    header('Pragma: no-cache');
-    header('Expires: 0');
+    // Range + caching: use file_hash as ETag validator; 3600s max-age
+    $etag = !empty($file['file_hash']) ? '"' . $file['file_hash'] . '"' : null;
+    if ($etag !== null) {
+        header('ETag: ' . $etag);
+        if (isset($_SERVER['HTTP_IF_NONE_MATCH']) && $_SERVER['HTTP_IF_NONE_MATCH'] === $etag) {
+            http_response_code(304);
+            exit;
+        }
+    }
+    header('Cache-Control: private, max-age=3600');
     try {
-        storageEmitBody($relPath);
+        storageEmitBodyRange($relPath);
     } catch (StorageException $e) {
         http_response_code(404);
         error_log('[CHED] preview blocked, storage unavailable: ' . get_class($e));
@@ -414,7 +462,7 @@ if (in_array($ext, ['doc', 'docx', 'docs'])) {
         header('Content-Type: text/html; charset=utf-8');
         echo '<!DOCTYPE html>
             <html>
-            <head>{$previewFaviconTags}
+            <head>' . $previewFaviconTags . '
                 <meta charset="UTF-8">
                 <title>Preview Unavailable</title>
                 <style>
@@ -431,23 +479,30 @@ if (in_array($ext, ['doc', 'docx', 'docs'])) {
                     <h2>Preview Not Available</h2>
                     <p>Word document preview requires the ZIP extension to be enabled on the server.</p>
                     <p>Please contact your system administrator to enable the php_zip extension.</p>
-                    <a href="download_document.php?id=' . (int)$id . '&source=' . htmlspecialchars($source) . '" class="btn" download>Download Document</a>
+                    <a href="preview.php?id=' . (int)$id . '&source=' . htmlspecialchars($source) . '&download=1" class="btn" download>Download Document</a>
                 </div>
             </body>
             </html>';
         exit;
     }
-    
-    $cachePath = getCachePath($relPath, 'word');
+
+    // Missing ETag: early 304 Not Modified check
+    $fileHash = $file['file_hash'] ?? null;
+    if ($fileHash !== null) {
+        $etag = '"' . $fileHash . '"';
+        if (isset($_SERVER['HTTP_IF_NONE_MATCH']) && $_SERVER['HTTP_IF_NONE_MATCH'] === $etag) {
+            http_response_code(304);
+            header('Content-Type: text/html; charset=utf-8');
+            exit;
+        }
+    }
+
+    $cachePath = getCachePath($relPath, 'word', $fileHash);
     if (file_exists($cachePath)) {
         header('Content-Type: text/html; charset=utf-8');
         readfile($cachePath);
         exit;
     }
-
-    // Minimal loading indicator while conversion prepares.
-    echo "<!DOCTYPE html><html><head>{$previewFaviconTags}<meta charset=\"UTF-8\"><title>Loading preview...</title><style>body{font-family:sans-serif;text-align:center;padding:60px;background:#f5f5f5;color:#555;}h2{color:#2563eb;}</style></head><body><h2>Preparing preview...</h2><p>Please wait while the document is being converted.</p></body></html>";
-    flush();
 
     // PhpOffice only reads local files: stage a temp copy of the object and
     // always remove it afterwards (plan §6.1).
@@ -470,7 +525,7 @@ if (in_array($ext, ['doc', 'docx', 'docs'])) {
         // Wrap in responsive HTML document
         $finalHtml = '<!DOCTYPE html>
             <html>
-            <head>{$previewFaviconTags}
+            <head>' . $previewFaviconTags . '
                 <meta charset="UTF-8">
                 <meta name="viewport" content="width=device-width, initial-scale=1.0">
                 <title>' . htmlspecialchars($file['filename']) . '</title>
@@ -515,8 +570,8 @@ if (in_array($ext, ['doc', 'docx', 'docs'])) {
             </body>
             </html>';
 
-        // Cache the result
-        file_put_contents($cachePath, $finalHtml);
+        // Cache the result atomically
+        writePreviewCacheAtomic($cachePath, $finalHtml);
 
         header('Content-Type: text/html; charset=utf-8');
         echo $finalHtml;
@@ -524,10 +579,10 @@ if (in_array($ext, ['doc', 'docx', 'docs'])) {
     } catch (Exception $e) {
         error_log("Word conversion error: " . $e->getMessage());
         header('Content-Type: text/html; charset=utf-8');
-        $downloadUrl = 'download_document.php?id=' . (int)$id . '&source=' . htmlspecialchars($source);
+        $downloadUrl = 'preview.php?id=' . (int)$id . '&source=' . htmlspecialchars($source) . '&download=1';
         echo '<!DOCTYPE html>
             <html>
-            <head>{$previewFaviconTags}
+            <head>' . $previewFaviconTags . '
                 <meta charset="UTF-8">
                 <title>Preview Error</title>
                 <style>
@@ -561,7 +616,7 @@ if (in_array($ext, ['xls', 'xlsx'])) {
         header('Content-Type: text/html; charset=utf-8');
         echo '<!DOCTYPE html>
             <html>
-            <head>{$previewFaviconTags}
+            <head>' . $previewFaviconTags . '
                 <meta charset="UTF-8">
                 <title>Preview Unavailable</title>
                 <style>
@@ -578,23 +633,30 @@ if (in_array($ext, ['xls', 'xlsx'])) {
                     <h2>Preview Not Available</h2>
                     <p>Excel document preview requires the ZIP extension to be enabled on the server.</p>
                     <p>Please contact your system administrator to enable the php_zip extension.</p>
-                    <a href="download_document.php?id=' . (int)$id . '&source=' . htmlspecialchars($source) . '" class="btn" download>Download Document</a>
+                    <a href="preview.php?id=' . (int)$id . '&source=' . htmlspecialchars($source) . '&download=1" class="btn" download>Download Document</a>
                 </div>
             </body>
             </html>';
         exit;
     }
     
-    $cachePath = getCachePath($relPath, 'excel');
+    // Missing ETag: early 304 Not Modified check
+    $fileHash = $file['file_hash'] ?? null;
+    if ($fileHash !== null) {
+        $etag = '"' . $fileHash . '"';
+        if (isset($_SERVER['HTTP_IF_NONE_MATCH']) && $_SERVER['HTTP_IF_NONE_MATCH'] === $etag) {
+            http_response_code(304);
+            header('Content-Type: text/html; charset=utf-8');
+            exit;
+        }
+    }
+
+    $cachePath = getCachePath($relPath, 'excel', $fileHash);
     if (file_exists($cachePath)) {
         header('Content-Type: text/html; charset=utf-8');
         readfile($cachePath);
         exit;
     }
-
-    // Minimal loading indicator while conversion prepares.
-    echo "<!DOCTYPE html><html><head>{$previewFaviconTags}<meta charset=\"UTF-8\"><title>Loading preview...</title><style>body{font-family:sans-serif;text-align:center;padding:60px;background:#f5f5f5;color:#555;}h2{color:#2563eb;}</style></head><body><h2>Preparing preview...</h2><p>Please wait while the document is being converted.</p></body></html>";
-    flush();
 
     // PhpOffice only reads local files: stage a temp copy of the object and
     // always remove it afterwards (plan §6.1).
@@ -617,7 +679,7 @@ if (in_array($ext, ['xls', 'xlsx'])) {
         // Wrap with responsive CSS
         $finalHtml = '<!DOCTYPE html>
             <html>
-            <head>{$previewFaviconTags}
+            <head>' . $previewFaviconTags . '
                 <meta charset="UTF-8">
                 <meta name="viewport" content="width=device-width, initial-scale=1.0">
                 <title>' . htmlspecialchars($file['filename']) . '</title>
@@ -656,7 +718,8 @@ if (in_array($ext, ['xls', 'xlsx'])) {
             </body>
             </html>';
 
-        file_put_contents($cachePath, $finalHtml);
+        // Cache the result atomically
+        writePreviewCacheAtomic($cachePath, $finalHtml);
 
         header('Content-Type: text/html; charset=utf-8');
         echo $finalHtml;
@@ -664,10 +727,10 @@ if (in_array($ext, ['xls', 'xlsx'])) {
     } catch (Exception $e) {
         error_log("Excel conversion error: " . $e->getMessage());
         header('Content-Type: text/html; charset=utf-8');
-        $downloadUrl = 'download_document.php?id=' . (int)$id . '&source=' . htmlspecialchars($source);
+        $downloadUrl = 'preview.php?id=' . (int)$id . '&source=' . htmlspecialchars($source) . '&download=1';
         echo '<!DOCTYPE html>
             <html>
-            <head>{$previewFaviconTags}
+            <head>' . $previewFaviconTags . '
                 <meta charset="UTF-8">
                 <title>Preview Error</title>
                 <style>
@@ -700,7 +763,7 @@ if (in_array($ext, ['ppt', 'pptx'])) {
         header('Content-Type: text/html; charset=utf-8');
         echo '<!DOCTYPE html>
             <html>
-            <head>{$previewFaviconTags}
+            <head>' . $previewFaviconTags . '
                 <meta charset="UTF-8">
                 <title>Preview Unavailable</title>
                 <style>
@@ -717,7 +780,7 @@ if (in_array($ext, ['ppt', 'pptx'])) {
                     <h2>Preview Not Available</h2>
                     <p>PowerPoint preview requires the ZIP extension to be enabled on the server.</p>
                     <p>Please contact your system administrator to enable the php_zip extension.</p>
-                    <a href="download_document.php?id=' . (int)$id . '&source=' . htmlspecialchars($source) . '" class="btn" download>Download Document</a>
+                    <a href="preview.php?id=' . (int)$id . '&source=' . htmlspecialchars($source) . '&download=1" class="btn" download>Download Document</a>
                 </div>
             </body>
             </html>';
@@ -725,9 +788,17 @@ if (in_array($ext, ['ppt', 'pptx'])) {
     }
 
     // Use .pdf extension for PowerPoint cache
-    $cacheDir = getPreviewCacheDir();
-    $cacheKey = md5($relPath);
-    $cachePath = $cacheDir . "{$cacheKey}_ppt.pdf";
+    $fileHash = $file['file_hash'] ?? null;
+    if ($fileHash !== null) {
+        $etag = '"' . $fileHash . '"';
+        if (isset($_SERVER['HTTP_IF_NONE_MATCH']) && $_SERVER['HTTP_IF_NONE_MATCH'] === $etag) {
+            http_response_code(304);
+            header('Content-Type: application/pdf');
+            exit;
+        }
+    }
+
+    $cachePath = getCachePath($relPath, 'ppt', $fileHash, 'pdf');
     
     if (file_exists($cachePath)) {
         // Clear output buffers to prevent gzip corruption of binary PDF
@@ -737,10 +808,6 @@ if (in_array($ext, ['ppt', 'pptx'])) {
         readfile($cachePath);
         exit;
     }
-
-    // Minimal loading indicator while conversion prepares.
-    echo "<!DOCTYPE html><html><head>{$previewFaviconTags}<meta charset=\"UTF-8\"><title>Loading preview...</title><style>body{font-family:sans-serif;text-align:center;padding:60px;background:#f5f5f5;color:#555;}h2{color:#2563eb;}</style></head><body><h2>Preparing preview...</h2><p>Please wait while the document is being converted.</p></body></html>";
-    flush();
 
     // PhpOffice only reads local files: stage a temp copy of the object and
     // always remove it afterwards (plan §6.1).
@@ -771,10 +838,10 @@ if (in_array($ext, ['ppt', 'pptx'])) {
     } catch (Exception $e) {
         error_log("PowerPoint conversion error: " . $e->getMessage());
         header('Content-Type: text/html; charset=utf-8');
-        $downloadUrl = 'download_document.php?id=' . (int)$id . '&source=' . htmlspecialchars($source);
+        $downloadUrl = 'preview.php?id=' . (int)$id . '&source=' . htmlspecialchars($source) . '&download=1';
         echo '<!DOCTYPE html>
             <html>
-            <head>{$previewFaviconTags}
+            <head>' . $previewFaviconTags . '
                 <meta charset="UTF-8">
                 <title>Preview Error</title>
                 <style>
@@ -803,10 +870,10 @@ if (in_array($ext, ['ppt', 'pptx'])) {
 // ---------- Unsupported Format ----------
 header('Content-Type: text/html; charset=utf-8');
 http_response_code(415);
-$downloadUrl = 'download_document.php?id=' . (int)$id . '&source=' . htmlspecialchars($source);
+$downloadUrl = 'preview.php?id=' . (int)$id . '&source=' . htmlspecialchars($source) . '&download=1';
 echo '<!DOCTYPE html>
 <html>
-<head>{$previewFaviconTags}
+<head>' . $previewFaviconTags . '
     <meta charset="UTF-8">
     <title>Unsupported Format</title>
     <style>

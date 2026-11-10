@@ -1239,7 +1239,7 @@ include 'includes/header.php';
                     </div>
                     <div class="form-group">
                         <label class="form-label">Template / Guide File</label>
-                        <input type="file" name="req_file" class="form-input">
+                        <input type="file" name="req_file" class="form-input" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.gif,.webp,.xls,.xlsx,.ppt,.pptx">
                     </div>
                     <button type="submit" class="btn btn-primary btn-block"><?= render_dashboard_icon('plus') ?> Create <?= phRoleShort() ?> Requirement</button>
                 </form>
@@ -1262,7 +1262,7 @@ include 'includes/header.php';
                     </div>
                     <div class="form-group">
                         <label class="form-label">Select File <span style="color: var(--danger);">*</span></label>
-                        <input type="file" name="upload_file" class="form-input" required>
+                        <input type="file" name="upload_file" class="form-input" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.gif,.webp,.xls,.xlsx,.ppt,.pptx" required>
                     </div>
                     <button type="submit" class="btn btn-outline btn-block"><?= render_dashboard_icon('send') ?> Upload for Admin Review</button>
                 </form>
@@ -1407,7 +1407,7 @@ include 'includes/header.php';
                                         </div>
                                         <div class="form-group">
                                             <label class="form-label">Replace file</label>
-                                            <input type="file" name="req_file" class="form-input">
+                                            <input type="file" name="req_file" class="form-input" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.gif,.webp,.xls,.xlsx,.ppt,.pptx">
                                         </div>
                                         <div style="display: flex; gap: 0.5rem;">
                                             <button type="submit" class="btn btn-primary btn-sm">Update</button>

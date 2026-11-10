@@ -2,6 +2,7 @@
 define('CHED_APP', true);
 require_once 'config.php';
 requireAdmin();
+// Defense in depth: explicit super_admin redirect (requireAdmin blocks at config level)
 if (superadmin()) {
     header('Location: super_admin_audit_trail.php');
     exit;

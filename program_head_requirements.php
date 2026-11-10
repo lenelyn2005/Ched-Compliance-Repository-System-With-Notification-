@@ -3,7 +3,6 @@ define('CHED_APP', true);
 require_once 'config.php';
 requireDepartment();
 
-
 $deptId = (int)$_SESSION['department_id'];
 $userId = (int)$_SESSION['user_id'];
 $currentFolderId = isset($_GET['folder']) ? (int)$_GET['folder'] : null;
@@ -11,6 +10,157 @@ $currentFolderId = isset($_GET['folder']) ? (int)$_GET['folder'] : null;
 $error = '';
 $success = '';
 
+// ============================================================================
+// LIGHTWEIGHT FILE-BACKED EVENT QUEUE (no DB, no new files)
+// ============================================================================
+function phEventQueueDir(): string {
+    $dir = sys_get_temp_dir() . '/ched_rt';
+    if (!is_dir($dir)) @mkdir($dir, 0700, true);
+    return $dir;
+}
+function phEventQueuePath(int $deptId): string {
+    return phEventQueueDir() . "/dept_{$deptId}.jsonl";
+}
+
+function publishPhEvent(int $deptId, string $type, ?int $reqId, array $payload, ?int $targetUserId = null): void {
+    $path  = phEventQueuePath($deptId);
+    $event = [
+        'id'      => (int)(microtime(true) * 1_000_000),
+        'type'    => $type,
+        'req_id'  => $reqId,
+        'uid'     => $targetUserId,
+        'payload' => $payload,
+        'ts'      => time(),
+    ];
+    $line = json_encode($event, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n";
+    $fh = @fopen($path, 'ab');
+    if ($fh) {
+        if (flock($fh, LOCK_EX)) { fwrite($fh, $line); flock($fh, LOCK_UN); }
+        fclose($fh);
+    }
+    if (@filesize($path) > 262144) {
+        $lines = @file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [];
+        @file_put_contents($path, implode("\n", array_slice($lines, -500)) . "\n", LOCK_EX);
+    }
+}
+
+function readPhEvents(int $deptId, int $sinceId, int $userId): array {
+    $path = phEventQueuePath($deptId);
+    if (!is_file($path)) return [];
+    $out = [];
+    $fh  = @fopen($path, 'rb');
+    if (!$fh) return [];
+    if (flock($fh, LOCK_SH)) {
+        while (($line = fgets($fh)) !== false) {
+            $ev = json_decode(trim($line), true);
+            if (!is_array($ev) || ($ev['id'] ?? 0) <= $sinceId) continue;
+            if ($ev['uid'] === null || (int)$ev['uid'] === $userId) $out[] = $ev;
+        }
+        flock($fh, LOCK_UN);
+    }
+    fclose($fh);
+    return $out;
+}
+
+// ============================================================================
+// INLINE SSE STREAM  (?stream=1)
+// ============================================================================
+if (($_GET['stream'] ?? '') === '1') {
+    session_write_close();
+
+    header('Content-Type: text/event-stream');
+    header('Cache-Control: no-cache, no-store, must-revalidate');
+    header('X-Accel-Buffering: no');
+    @ini_set('zlib.output_compression', '0');
+    @ini_set('output_buffering', '0');
+    while (ob_get_level() > 0) ob_end_flush();
+
+    $lastId = 0;
+    if (!empty($_SERVER['HTTP_LAST_EVENT_ID'])) $lastId = (int)$_SERVER['HTTP_LAST_EVENT_ID'];
+    elseif (!empty($_GET['last_id']))            $lastId = (int)$_GET['last_id'];
+
+    echo "retry: 1000\n: connected\n\n"; flush();
+
+    $start     = time();
+    $maxLife   = 25;
+    $heartbeat = 0;
+
+    while (true) {
+        foreach (readPhEvents($deptId, $lastId, $userId) as $ev) {
+            $lastId = (int)$ev['id'];
+            $data   = $ev['payload'] + ['_id' => $lastId, '_type' => $ev['type'], 'req_id' => $ev['req_id']];
+            echo "id: {$lastId}\n";
+            echo "event: {$ev['type']}\n";
+            echo "data: " . json_encode($data, JSON_UNESCAPED_SLASHES) . "\n\n";
+            flush();
+        }
+        if ((time() - $start) >= $maxLife) { echo "retry: 1000\n\n"; exit; }
+        if (connection_aborted()) exit;
+        if (++$heartbeat % 30 === 0) { echo ": ping\n\n"; flush(); }
+        usleep(500_000);
+    }
+}
+
+// ============================================================================
+// TARGETED ROW RENDER  (?render=row&id=X)
+// ============================================================================
+if (($_GET['render'] ?? '') === 'row') {
+    header('Content-Type: application/json');
+    $rid = (int)($_GET['id'] ?? 0);
+    if ($rid <= 0) { echo json_encode(['html' => null]); exit; }
+
+    $stmt = $pdo->prepare("
+        SELECT dr.*, tr.id as tr_id, tr.teacher_id, tr.deadline, u.name as teacher_name,
+               doc.status as current_status, doc.id as doc_id,
+               doc.teacher_requirement_id as doc_tr_id, doc.file_path, doc.filename,
+               (SELECT COUNT(DISTINCT id) FROM teacher_requirements WHERE requirement_id = dr.id) as total_assigned,
+               (SELECT COUNT(*) FROM documents d2 WHERE d2.department_id = dr.department_id
+                 AND d2.category = dr.category AND d2.document_type = dr.document_type
+                 AND d2.status = 'approved_admin' AND d2.teacher_requirement_id IS NULL
+                 AND d2.archived = 0
+                 AND (dr.cycle_started_at IS NULL OR d2.upload_date >= dr.cycle_started_at)) as direct_approved_count,
+               (SELECT COUNT(*) FROM documents d2 WHERE d2.department_id = dr.department_id
+                 AND d2.category = dr.category AND d2.document_type = dr.document_type
+                 AND d2.status IN ('pending_program_head','pending_admin') AND d2.teacher_requirement_id IS NULL
+                 AND d2.archived = 0
+                 AND (dr.cycle_started_at IS NULL OR d2.upload_date >= dr.cycle_started_at)) as direct_pending_count,
+               (SELECT COUNT(*) FROM documents d2 WHERE d2.department_id = dr.department_id
+                 AND d2.category = dr.category AND d2.document_type = dr.document_type
+                 AND d2.status IN ('rejected_program_head','rejected_admin') AND d2.teacher_requirement_id IS NULL
+                 AND d2.archived = 0
+                 AND (dr.cycle_started_at IS NULL OR d2.upload_date >= dr.cycle_started_at)) as direct_rejected_count,
+               (SELECT GROUP_CONCAT(latest.status) FROM (
+                   SELECT d3.status, d3.teacher_requirement_id, d3.upload_date FROM documents d3
+                   INNER JOIN (SELECT teacher_requirement_id, MAX(version) AS max_ver FROM documents
+                               WHERE teacher_requirement_id IS NOT NULL GROUP BY teacher_requirement_id) lm
+                     ON d3.teacher_requirement_id = lm.teacher_requirement_id AND d3.version = lm.max_ver
+               ) latest
+               WHERE latest.teacher_requirement_id IN (SELECT tr2.id FROM teacher_requirements tr2 WHERE tr2.requirement_id = dr.id)
+                 AND (dr.cycle_started_at IS NULL OR latest.upload_date >= dr.cycle_started_at)) as latest_statuses
+        FROM department_requirements dr
+        LEFT JOIN teacher_requirements tr ON dr.id = tr.requirement_id
+        LEFT JOIN users u ON tr.teacher_id = u.id
+        LEFT JOIN documents doc ON doc.id = (
+            SELECT d2.id FROM documents d2
+            WHERE d2.department_id = dr.department_id AND d2.category = dr.category
+              AND d2.document_type = dr.document_type
+              AND d2.file_path IS NOT NULL AND d2.file_path != '' AND d2.archived = 0
+            ORDER BY d2.version DESC, d2.id DESC LIMIT 1)
+        WHERE dr.id = ? AND dr.department_id = ?
+        LIMIT 1
+    ");
+    $stmt->execute([$rid, $deptId]);
+    $req = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    if (!$req) { echo json_encode(['html' => null]); exit; }
+
+    echo json_encode(['html' => renderPhReqRow($req)]);
+    exit;
+}
+
+// ============================================================================
+// HELPERS
+// ============================================================================
 function isRequirementComplete(array $req): bool
 {
     $totalAssigned   = (int)($req['total_assigned'] ?? 0);
@@ -20,7 +170,6 @@ function isRequirementComplete(array $req): bool
     $latestStatuses  = array_filter(array_map('trim', explode(',', (string)($req['latest_statuses'] ?? ''))));
 
     if ($totalAssigned > 0) {
-        // Everyone assigned must have approved, nothing in review
         $allApproved = !empty($latestStatuses)
             && !in_array('pending_program_head', $latestStatuses, true)
             && !in_array('pending_admin', $latestStatuses, true)
@@ -33,14 +182,11 @@ function isRequirementComplete(array $req): bool
             && $directRejected === 0;
     }
 
-  
     return $directApproved > 0 && $directPending === 0 && $directRejected === 0;
 }
 
 function resolvePhReqState(?string $docStatus, $trId, bool $isComplete = false, int $directRejected = 0, int $directPending = 0): array
 {
-    // Admin sees this as "Complete" → PH sees it as "Approved".
-    // Read-only from the PH side: no reassign, no personal upload.
     if ($isComplete) {
         return [
             'key' => 'approved',
@@ -55,6 +201,18 @@ function resolvePhReqState(?string $docStatus, $trId, bool $isComplete = false, 
 
     $assigned = !empty($trId);
     $rejected = in_array($docStatus, ['rejected_program_head', 'rejected_admin'], true);
+
+    if ($docStatus === 'draft') {
+        return [
+            'key' => 'draft',
+            'label' => 'Draft — Not Submitted',
+            'class' => 'badge-draft',
+            'can_unassign' => false,
+            'can_upload' => false,
+            'can_assign' => false,
+            'blocked' => true,
+        ];
+    }
 
     if ($rejected) {
         return [
@@ -144,7 +302,6 @@ function resolvePhReqState(?string $docStatus, $trId, bool $isComplete = false, 
     ];
 }
 
-// Latest non-archived doc for a requirement (dept scope enforced by caller).
 function getLatestReqDoc(PDO $pdo, int $deptId, string $category, string $docType, ?int $teacherRequirementId = null): ?array
 {
     if ($teacherRequirementId !== null) {
@@ -168,11 +325,6 @@ function getLatestReqDoc(PDO $pdo, int $deptId, string $category, string $docTyp
     return $row ?: null;
 }
 
-
-// ============================================================================
-// HELPER FUNCTIONS
-// ============================================================================
-
 function getFolderPathSegments($pdo, $folderId)
 {
     $segments = [];
@@ -189,9 +341,126 @@ function getFolderPathSegments($pdo, $folderId)
 }
 
 // ============================================================================
+// ROW RENDERER
+// ============================================================================
+function renderPhReqRow(array $req): string
+{
+    $isComplete = isRequirementComplete($req);
+    $state = resolvePhReqState(
+        $req['current_status'] ?? null,
+        $req['tr_id'] ?? null,
+        $isComplete,
+        (int)($req['direct_rejected_count'] ?? 0),
+        (int)($req['direct_pending_count'] ?? 0)
+    );
+    $sl = [$state['label'], $state['class']];
+    $expired = $req['expiration_date'] && strtotime($req['expiration_date']) < time();
+    $isAssigned = !empty($req['tr_id']);
+    $isDraft = ($state['key'] === 'draft');
+    $showManageBtn = !$state['blocked'] && !$isDraft;
+
+    ob_start(); ?>
+    <tr data-row-id="requirement:<?= (int)$req['id'] ?>"
+        data-requirement-id="<?= (int)$req['id'] ?>"
+        data-sort-key="<?= sanitize(strtolower($req['category'] . '|' . $req['document_type'])) ?>">
+        <td>
+            <div>
+                <strong class="req-category"><?= sanitize($req['category']) ?></strong>
+                <span class="req-doc"><?= sanitize($req['document_type']) ?></span>
+            </div>
+        </td>
+        <td>
+            <span class="badge <?= $req['mandatory'] ? 'badge-required' : 'badge-optional' ?>">
+                <?= $req['mandatory'] ? 'Required' : 'Optional' ?>
+            </span>
+        </td>
+        <td>
+            <?php if ($req['expiration_date']): ?>
+                <span class="<?= $expired ? 'text-danger' : '' ?>">
+                    <?= date('M j, Y', strtotime($req['expiration_date'])) ?>
+                </span>
+                <?php if ($expired): ?>
+                    <span class="badge badge-rejected" style="margin-left:0.5rem;">Expired</span>
+                <?php endif; ?>
+            <?php else: ?>—<?php endif; ?>
+        </td>
+        <td><span class="badge <?= $sl[1] ?>"><?= $sl[0] ?></span></td>
+        <td>
+            <div class="btn-group">
+                <?php if ($isDraft && $req['doc_id']): ?>
+                    <div class="action-dropdown">
+                        <button type="button" class="dropdown-trigger">
+                            Manage
+                            <svg class="chevron" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5"/></svg>
+                        </button>
+                        <div class="dropdown-menu">
+                            <button type="button" class="dropdown-item view-btn"
+                                    data-id="<?= (int)$req['doc_id'] ?>"
+                                    data-type="document"
+                                    data-filename="<?= sanitize($req['filename'] ?? '') ?>"
+                                    data-title="<?= sanitize($req['category'] . ' - ' . $req['document_type']) ?>">
+                                <svg fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z"/><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                                View Draft
+                            </button>
+                            <button type="button" class="dropdown-item submit-draft-btn text-primary"
+                                    data-id="<?= (int)$req['doc_id'] ?>">
+                                <svg fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5"/></svg>
+                                Submit
+                            </button>
+                            <button type="button" class="dropdown-item change-draft-btn"
+                                    data-reqid="<?= (int)$req['id'] ?>"
+                                    data-label="<?= sanitize($req['category'] . ' - ' . $req['document_type']) ?>">
+                                <svg fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99"/></svg>
+                                Change File
+                            </button>
+                            <div class="dropdown-divider"></div>
+                            <button type="button" class="dropdown-item delete-draft-btn text-danger"
+                                    data-id="<?= (int)$req['doc_id'] ?>">
+                                <svg fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0"/></svg>
+                                Delete Draft
+                            </button>
+                        </div>
+                    </div>
+                <?php elseif ($showManageBtn): ?>
+                    <button class="btn btn-sm btn-primary action-btn"
+                            data-id="<?= $req['id'] ?>"
+                            data-name="<?= sanitize($req['category'] . ' - ' . $req['document_type']) ?>"
+                            data-state="<?= $state['key'] ?>"
+                            data-assigned="<?= $isAssigned ? '1' : '0' ?>"
+                            data-trid="<?= $req['tr_id'] ?? '' ?>"
+                            data-can-unassign="<?= $state['can_unassign'] ? '1' : '0' ?>"
+                            data-can-upload="<?= $state['can_upload'] ? '1' : '0' ?>"
+                            data-can-assign="<?= $state['can_assign'] ? '1' : '0' ?>"
+                            data-rejected="<?= $state['key'] === 'rejected' ? '1' : '0' ?>">
+                        Manage
+                    </button>
+                <?php endif; ?>
+                <?php if (!empty(trim((string)($req['description'] ?? '')))): ?>
+                    <button type="button" class="btn btn-sm btn-secondary desc-btn"
+                            data-name="<?= sanitize($req['category'] . ' - ' . $req['document_type']) ?>"
+                            data-desc="<?= sanitize($req['description']) ?>">
+                        Description
+                    </button>
+                <?php endif; ?>
+                <?php if ($req['doc_id'] && !$isDraft): ?>
+                    <button type="button" class="btn btn-sm btn-secondary view-btn"
+                            data-id="<?= $req['doc_id'] ?>"
+                            data-type="document"
+                            data-filename="<?= sanitize($req['filename'] ?? '') ?>"
+                            data-title="<?= sanitize($req['category'] . ' - ' . $req['document_type']) ?>"
+                            style="cursor:pointer;">
+                        View
+                    </button>
+                <?php endif; ?>
+            </div>
+        </td>
+    </tr>
+    <?php return ob_get_clean();
+}
+
+// ============================================================================
 // FORM HANDLING
 // ============================================================================
-
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     requireCsrfToken();
     $action = $_POST['action'] ?? '';
@@ -205,7 +474,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!$teacherId || !$reqId) {
             $error = "Please select a faculty member.";
         } else {
-            // Ownership: requirement + teacher must belong to this PH's department.
             $reqData = $pdo->prepare("SELECT id, category, document_type FROM department_requirements WHERE id = ? AND department_id = ?");
             $reqData->execute([$reqId, $deptId]);
             $rd = $reqData->fetch();
@@ -222,21 +490,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     if ($check->fetch()) {
                         $error = "Already assigned to a faculty member.";
                     } else {
-                        // Block assign while any active doc is in review or approved.
                         $latest = getLatestReqDoc($pdo, $deptId, $rd['category'], $rd['document_type']);
                         $latestStatus = $latest['status'] ?? null;
                         if (in_array($latestStatus, ['pending_program_head', 'pending_admin', 'approved_admin', 'approved_program_head'], true)) {
                             $error = "Cannot assign while this requirement is under review or approved.";
                         } else {
-                            // Rejected personal upload is superseded by assignment: archive it.
                             if ($latest && $latest['teacher_requirement_id'] === null
-                                && in_array($latestStatus, ['rejected_admin', 'rejected_program_head'], true)) {
+                                && in_array($latestStatus, ['rejected_admin', 'rejected_program_head', 'draft'], true)) {
                                 $pdo->prepare("UPDATE documents SET archived = 1 WHERE id = ?")->execute([(int)$latest['id']]);
                             }
-                            // Rejected teacher doc without assignment row is fine; with assignment, already blocked above.
                             $result = assignRequirementToTeacher($pdo, $teacherId, $reqId, $userId, $deadline);
                             if (!empty($result['success'])) {
                                 $success = "Requirement assigned to faculty member.";
+                                publishPhEvent($deptId, 'requirement.assigned', $reqId, ['req_id' => $reqId]);
                             } else {
                                 $error = "Failed to assign requirement.";
                             }
@@ -246,7 +512,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
     }
-    
+
     elseif ($action === 'upload_personal') {
         $comment = trim($_POST['comment'] ?? '');
         if (!isset($_FILES['document_file']) || $_FILES['document_file']['error'] !== UPLOAD_ERR_OK) {
@@ -263,13 +529,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $tr = $trRow->fetch();
                 $latest = getLatestReqDoc($pdo, $deptId, $rd['category'], $rd['document_type']);
                 $latestStatus = $latest['status'] ?? null;
-                $state = resolvePhReqState($latestStatus, $tr['id'] ?? null);
 
-                if (!$state['can_upload']) {
+                if (in_array($latestStatus, ['pending_program_head', 'pending_admin', 'approved_admin', 'approved_program_head'], true)) {
                     $error = "Cannot upload while this requirement is pending review or approved.";
                 } else {
-                    // Active teacher submission blocks personal upload.
-                    // Assigned (no submission) or Rejected faculty: personal upload supersedes assignment.
                     if ($tr) {
                         $tDoc = getLatestReqDoc($pdo, $deptId, $rd['category'], $rd['document_type'], (int)$tr['id']);
                         $tStatus = $tDoc['status'] ?? null;
@@ -281,9 +544,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         }
                     }
                     if (!$error) {
-                        $result = uploadDepartmentSubmission($pdo, $reqId, $userId, $_FILES['document_file'], $comment, $deptId);
+                        $result = uploadDepartmentSubmissionDraft($pdo, $reqId, $userId, $_FILES['document_file'], $comment, $deptId);
                         if ($result === true) {
-                            $success = "Document uploaded successfully and forwarded to Admin.";
+                            $success = "Draft saved. Use View to review, then Submit to forward it to Admin.";
+                            publishPhEvent($deptId, 'requirement.uploaded', $reqId, ['req_id' => $reqId]);
                         } else {
                             $error = $result;
                         }
@@ -292,12 +556,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
     }
-    
+
+    elseif ($action === 'submit_draft') {
+        $docId = (int)($_POST['document_id'] ?? 0);
+        if ($docId <= 0) {
+            sendJson(['success' => false, 'message' => 'Invalid draft.']);
+        }
+        $res = submitDepartmentDraft($pdo, $docId, $deptId);
+        if (!empty($res['success'])) {
+            $reqIdForEvent = (int)($res['requirement_id'] ?? $reqId);
+            if ($reqIdForEvent > 0) {
+                publishPhEvent($deptId, 'requirement.status_changed', $reqIdForEvent, ['req_id' => $reqIdForEvent]);
+            }
+        }
+        sendJson($res);
+    }
+
+    elseif ($action === 'delete_draft') {
+        $docId = (int)($_POST['document_id'] ?? 0);
+        if ($docId <= 0) {
+            sendJson(['success' => false, 'message' => 'Invalid draft.']);
+        }
+        $res = deleteDepartmentDraft($pdo, $docId, $deptId, $userId);
+        if (!empty($res['success']) && $reqId > 0) {
+            publishPhEvent($deptId, 'requirement.status_changed', $reqId, ['req_id' => $reqId]);
+        }
+        sendJson($res);
+    }
+
     elseif ($action === 'unassign') {
         $trId = (int)$_POST['tr_id'];
-        // Ownership: assignment must belong to a requirement in this department.
         $uStmt = $pdo->prepare("
-            SELECT tr.id, tr.teacher_id, dr.department_id, dr.category, dr.document_type
+            SELECT tr.id, tr.teacher_id, dr.department_id, dr.category, dr.document_type, dr.id as req_id
             FROM teacher_requirements tr
             JOIN department_requirements dr ON dr.id = tr.requirement_id
             WHERE tr.id = ? AND dr.department_id = ?
@@ -307,7 +597,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!$u) {
             $error = "Assignment not found.";
         } else {
-            // Block only when the teacher has an active (non-rejected) submission.
             $activeDoc = $pdo->prepare("
                 SELECT status FROM documents
                 WHERE teacher_requirement_id = ? AND archived = 0
@@ -323,10 +612,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 logAudit($pdo, 'unassign', "Unassigned requirement (tr.id=$trId)", 'teacher_requirement', $trId);
                 createNotification($pdo, (int)$u['teacher_id'], 'Requirement Unassigned', "You were unassigned from: {$u['category']} - {$u['document_type']}.", 'warning');
                 $success = "Assignment removed. You can now upload personally or re-assign.";
+                publishPhEvent($deptId, 'requirement.unassigned', (int)$u['req_id'], ['req_id' => (int)$u['req_id']]);
             }
         }
     }
-    
+
     elseif ($action === 'remove_personal') {
         $reqData = $pdo->prepare("SELECT id, category, document_type FROM department_requirements WHERE id = ? AND department_id = ?");
         $reqData->execute([$reqId, $deptId]);
@@ -349,11 +639,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $error = "Cannot remove while the document is awaiting review.";
                 }
                 elseif ($docStatus === 'rejected_admin' || $docStatus === 'rejected_program_head') {
-                    // Soft delete (§12): flag archived, keep row + stored file recoverable.
                     $pdo->prepare("DELETE FROM ph_repository WHERE document_id = ?")->execute([$docId]);
                     $pdo->prepare("UPDATE documents SET archived = 1 WHERE id = ?")->execute([$docId]);
                     logAudit($pdo, 'remove_rejected_upload', "Soft-removed rejected personal upload for requirement $reqId", 'document', $docId);
                     $success = "Rejected document removed (archived, files preserved).";
+                    publishPhEvent($deptId, 'requirement.upload_removed', $reqId, ['req_id' => $reqId]);
                 }
                 else {
                     $error = "Cannot remove this document.";
@@ -363,10 +653,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
     }
-    
+
     elseif ($action === 'delete_requirement') {
         $reqId = (int)$_POST['requirement_id'];
-        
+
         $checkApproved = $pdo->prepare("
             SELECT d.id FROM documents d
             JOIN department_requirements dr ON d.category = dr.category AND d.document_type = dr.document_type
@@ -382,25 +672,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (!$reqInfo) {
                 $error = "Requirement not found.";
             } else {
-            $wipeStmt = $pdo->prepare("SELECT teacher_id FROM teacher_requirements WHERE requirement_id = ?");
-            $wipeStmt->execute([$reqId]);
-            $assignedTeachers = $wipeStmt->fetchAll(PDO::FETCH_COLUMN);
-            $pdo->beginTransaction();
-            try {
-                deletePendingDocsForRequirement($pdo, $reqId, $deptId);
-                $pdo->prepare("DELETE FROM teacher_requirements WHERE requirement_id = ?")->execute([$reqId]);
-                $pdo->prepare("DELETE FROM department_requirements WHERE id = ?")->execute([$reqId]);
-                $pdo->commit();
-                foreach ($assignedTeachers as $tid) {
-                    createNotification($pdo, (int)$tid, 'Requirement Removed', "The requirement assigned to you was deleted by your " . currentRoleName() . ": {$reqInfo['category']} - {$reqInfo['document_type']}.", 'danger');
+                $wipeStmt = $pdo->prepare("SELECT teacher_id FROM teacher_requirements WHERE requirement_id = ?");
+                $wipeStmt->execute([$reqId]);
+                $assignedTeachers = $wipeStmt->fetchAll(PDO::FETCH_COLUMN);
+                $pdo->beginTransaction();
+                try {
+                    deletePendingDocsForRequirement($pdo, $reqId, $deptId);
+                    $pdo->prepare("DELETE FROM teacher_requirements WHERE requirement_id = ?")->execute([$reqId]);
+                    $pdo->prepare("DELETE FROM department_requirements WHERE id = ?")->execute([$reqId]);
+                    $pdo->commit();
+                    foreach ($assignedTeachers as $tid) {
+                        createNotification($pdo, (int)$tid, 'Requirement Removed', "The requirement assigned to you was deleted by your " . currentRoleName() . ": {$reqInfo['category']} - {$reqInfo['document_type']}.", 'danger');
+                    }
+                    $success = "Requirement deleted. Approved documents remain in the repository.";
+                    publishPhEvent($deptId, 'requirement.deleted', $reqId, ['req_id' => $reqId]);
+                    header("Location: " . $_SERVER['PHP_SELF']);
+                    exit;
+                } catch (Exception $e) {
+                    $pdo->rollBack();
+                    $error = "Database error: " . $e->getMessage();
                 }
-                $success = "Requirement deleted. Approved documents remain in the repository.";
-                header("Location: " . $_SERVER['PHP_SELF']);
-                exit;
-            } catch (Exception $e) {
-                $pdo->rollBack();
-                $error = "Database error: " . $e->getMessage();
-            }
             }
         }
     }
@@ -409,7 +700,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 // ============================================================================
 // DATA QUERIES
 // ============================================================================
-
 $deptName = '';
 $stmt = $pdo->prepare("SELECT department_name FROM departments WHERE id = ?");
 $stmt->execute([$deptId]);
@@ -418,10 +708,22 @@ $deptName = $stmt->fetchColumn();
 $folderPathSegments = $currentFolderId ? getFolderPathSegments($pdo, $currentFolderId) : [];
 
 if ($currentFolderId) {
-    $stmt = $pdo->prepare("SELECT id, folder_name as name, created_at, 'folder' as type FROM department_folders WHERE department_id = ? AND parent_folder_id = ? AND LOWER(folder_name) <> 'root' ORDER BY folder_name");
+    $stmt = $pdo->prepare("
+        SELECT df.id, df.folder_name as name, df.created_at, 'folder' as type,
+               (SELECT COUNT(*) FROM department_requirements dr WHERE dr.folder_id = df.id) as req_count
+        FROM department_folders df
+        WHERE df.department_id = ? AND df.parent_folder_id = ? AND LOWER(df.folder_name) <> 'root'
+        ORDER BY df.folder_name
+    ");
     $stmt->execute([$deptId, $currentFolderId]);
 } else {
-    $stmt = $pdo->prepare("SELECT id, folder_name as name, created_at, 'folder' as type FROM department_folders WHERE department_id = ? AND parent_folder_id IS NULL AND LOWER(folder_name) <> 'root' ORDER BY folder_name");
+    $stmt = $pdo->prepare("
+        SELECT df.id, df.folder_name as name, df.created_at, 'folder' as type,
+               (SELECT COUNT(*) FROM department_requirements dr WHERE dr.folder_id = df.id) as req_count
+        FROM department_folders df
+        WHERE df.department_id = ? AND df.parent_folder_id IS NULL AND LOWER(df.folder_name) <> 'root'
+        ORDER BY df.folder_name
+    ");
     $stmt->execute([$deptId]);
 }
 $folders = $stmt->fetchAll();
@@ -436,6 +738,7 @@ $reqSql = "
            doc.id as doc_id,
            doc.teacher_requirement_id as doc_tr_id,
            doc.file_path,
+           doc.filename,
            (SELECT COUNT(DISTINCT id) FROM teacher_requirements WHERE requirement_id = dr.id) as total_assigned,
            (SELECT COUNT(*) FROM documents d2
             WHERE d2.department_id = dr.department_id
@@ -495,17 +798,17 @@ $reqStmt = $pdo->prepare($reqSql);
 $reqStmt->execute($reqParams);
 $requirements = $reqStmt->fetchAll();
 
-$contents = [];
+$folderContents = [];
 foreach ($folders as $f) {
-    $contents[] = array_merge($f, ['is_folder' => true]);
+    $folderContents[] = array_merge($f, ['is_folder' => true]);
 }
+
+$reqContents = [];
 foreach ($requirements as $r) {
-    $contents[] = array_merge($r, ['is_folder' => false]);
+    $reqContents[] = array_merge($r, ['is_folder' => false]);
 }
-usort($contents, function($a, $b) {
-    if ($a['is_folder'] != $b['is_folder']) return $a['is_folder'] ? -1 : 1;
-    return strcasecmp($a['name'] ?? '', $b['name'] ?? '');
-});
+
+$totalItems = count($folderContents) + count($reqContents);
 
 $stats = ['approved' => 0, 'pending' => 0, 'rejected' => 0, 'not_uploaded' => 0];
 foreach ($requirements as $r) {
@@ -521,14 +824,8 @@ $teachers = getTeachersInDepartment($pdo, $deptId);
 
 $pageTitle = currentRoleName() . ' Requirements';
 
-// ============================================================================
-// EXTRA STYLES
-// ============================================================================
 $extraStyles = "
 <style>
-    /* ==============================
-       LAYOUT & CONTAINER
-       ============================== */
     body {
         background: linear-gradient(135deg, #f8fafc 0%, #eef2f7 100%);
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
@@ -569,9 +866,6 @@ $extraStyles = "
         gap: 1.15rem;
     }
 
-    /* ==============================
-       PAGE HERO
-       ============================== */
     .page-hero {
         background: linear-gradient(135deg, #1e40af 0%, #2563eb 50%, #3b82f6 100%);
         border-radius: 12px;
@@ -584,17 +878,8 @@ $extraStyles = "
         overflow: hidden;
         box-shadow: 0 4px 14px -4px rgba(37, 99, 235, 0.4);
     }
-    .page-hero h1 {
-        margin: 0;
-        font-size: 1.5rem;
-        font-weight: 800;
-        letter-spacing: -0.01em;
-    }
-    .page-hero p {
-        margin: 0.375rem 0 0;
-        opacity: 0.85;
-        font-size: 0.9rem;
-    }
+    .page-hero h1 { margin: 0; font-size: 1.5rem; font-weight: 800; letter-spacing: -0.01em; }
+    .page-hero p { margin: 0.375rem 0 0; opacity: 0.85; font-size: 0.9rem; }
     .page-hero-badge {
         background: rgba(255,255,255,0.2);
         padding: 0.5rem 1rem;
@@ -606,14 +891,8 @@ $extraStyles = "
         z-index: 1;
         transition: background 0.15s ease, transform 0.15s ease;
     }
-    .page-hero-badge:hover {
-        background: rgba(255,255,255,0.3);
-        transform: translateY(-1px);
-    }
+    .page-hero-badge:hover { background: rgba(255,255,255,0.3); transform: translateY(-1px); }
 
-    /* ==============================
-       STATS GRID
-       ============================== */
     .stats-grid {
         display: grid;
         grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -656,12 +935,7 @@ $extraStyles = "
         background: var(--accent-bg);
         color: var(--accent);
     }
-    .stat-info {
-        display: flex;
-        flex-direction: column;
-        gap: 0.1rem;
-        min-width: 0;
-    }
+    .stat-info { display: flex; flex-direction: column; gap: 0.1rem; min-width: 0; }
     .stat-label {
         font-size: 0.68rem;
         font-weight: 700;
@@ -684,9 +958,6 @@ $extraStyles = "
     .stat-rejected     { --accent: #ef4444; --accent-bg: #fee2e2; }
     .stat-not-uploaded { --accent: #6366f1; --accent-bg: #eef2ff; }
 
-    /* ==============================
-       MAIN CARD
-       ============================== */
     .main-card {
         flex: 1;
         display: flex;
@@ -748,12 +1019,7 @@ $extraStyles = "
         flex-wrap: wrap;
         min-width: 0;
     }
-    .breadcrumb a {
-        color: #475569;
-        text-decoration: none;
-        font-weight: 600;
-        transition: color 0.15s ease;
-    }
+    .breadcrumb a { color: #475569; text-decoration: none; font-weight: 600; transition: color 0.15s ease; }
     .breadcrumb a:hover { color: var(--primary); text-decoration: underline; }
     .breadcrumb > span { color: #94a3b8; font-weight: 500; }
     .card-header-right {
@@ -783,9 +1049,6 @@ $extraStyles = "
         background: var(--primary);
     }
 
-    /* ==============================
-       TABLE
-       ============================== */
     .card-body {
         flex: 1;
         min-height: 0;
@@ -794,6 +1057,80 @@ $extraStyles = "
     }
     .card-body.no-padding { padding: 0 !important; }
     .table-responsive { overflow-x: auto; }
+
+    .folders-section {
+        padding: 1.5rem;
+        border-bottom: 1px solid #f1f5f9;
+        background: #f8fafc;
+    }
+    .folder-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+        gap: 1rem;
+    }
+    .folder-card {
+        background: #ffffff;
+        border: 1px solid #e5e7eb;
+        border-radius: 12px;
+        padding: 1rem 1.25rem;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        transition: all 0.2s ease;
+        cursor: pointer;
+        text-decoration: none;
+        color: inherit;
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.02);
+    }
+    .folder-card:hover {
+        border-color: #bfdbfe;
+        box-shadow: 0 4px 12px -2px rgba(37, 99, 235, 0.1);
+        transform: translateY(-2px);
+        background: #ffffff;
+    }
+    .folder-card-left {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        min-width: 0;
+    }
+    .folder-icon-wrapper {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+    }
+    .folder-icon-svg {
+        width: 36px;
+        height: 36px;
+        fill: #fbbf24;
+    }
+    .folder-info {
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+        flex: 1;
+    }
+    .folder-title {
+        font-weight: 600;
+        font-size: 0.95rem;
+        color: #1e293b;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        margin-bottom: 0.2rem;
+    }
+    .folder-meta {
+        font-size: 0.8rem;
+        color: #64748b;
+        font-weight: 500;
+    }
+    .folder-chevron {
+        width: 18px;
+        height: 18px;
+        color: #94a3b8;
+        flex-shrink: 0;
+    }
 
     .data-table {
         width: 100%;
@@ -844,35 +1181,9 @@ $extraStyles = "
         to { opacity: 1; transform: translateY(0); }
     }
 
-    .data-table tr.folder-row { cursor: pointer; }
-    .data-table tr.folder-row:hover { background: #f1f5f9; }
-    .name-wrap { display: flex; align-items: center; gap: 0.55rem; }
-    .folder-chip {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        width: 32px; height: 32px;
-        border-radius: 8px;
-        background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
-        color: #92400e;
-        border: 1px solid #fde68a;
-        box-shadow: 0 1px 2px rgba(0,0,0,0.05);
-        flex-shrink: 0;
-    }
-    .folder-link {
-        font-weight: 700;
-        color: #0f172a;
-        text-decoration: none;
-        transition: color 0.15s ease;
-    }
-    .folder-link:hover { color: var(--primary); text-decoration: underline; }
-
     .req-category { font-weight: 700; color: #0f172a; }
     .req-doc { font-size: 0.78rem; color: #64748b; display: block; margin-top: 0.15rem; }
 
-    /* ==============================
-       BADGES
-       ============================== */
     .badge {
         display: inline-flex;
         align-items: center;
@@ -895,12 +1206,9 @@ $extraStyles = "
     .badge-assigned      { background: #eef2ff; color: #4338ca; border-color: #c7d2fe; }
     .badge-required      { background: #eff6ff; color: #1d4ed8; border-color: #bfdbfe; }
     .badge-optional      { background: #f1f5f9; color: #475569; border-color: #e2e8f0; }
-    .badge-folder        { background: transparent; color: #64748b; border-color: #e2e8f0; }
+    .badge-draft         { background: #ede9fe; color: #5b21b6; border-color: #ddd6fe; }
     .text-danger { color: #dc2626; font-weight: 600; }
 
-    /* ==============================
-       BUTTONS
-       ============================== */
     .btn-group {
         display: flex;
         align-items: center;
@@ -938,39 +1246,96 @@ $extraStyles = "
         transform: translateY(-1px);
         box-shadow: 0 6px 14px -4px rgba(37, 99, 235, 0.45);
     }
-    .btn-success {
-        background: #10b981;
-        color: #ffffff;
-    }
-    .btn-success:hover {
-        background: #059669;
-        transform: translateY(-1px);
-    }
-    .btn-danger {
-        background: var(--danger);
-        color: #ffffff;
-    }
-    .btn-danger:hover {
-        background: #dc2626;
-        transform: translateY(-1px);
-    }
-    .btn-secondary {
-        background: #f1f5f9;
-        color: #475569;
-        border-color: #e2e8f0;
-    }
-    .btn-secondary:hover {
-        background: #e2e8f0;
-    }
+    .btn-success { background: #10b981; color: #ffffff; }
+    .btn-success:hover { background: #059669; transform: translateY(-1px); }
+    .btn-danger { background: var(--danger); color: #ffffff; }
+    .btn-danger:hover { background: #dc2626; transform: translateY(-1px); }
+    .btn-secondary { background: #f1f5f9; color: #475569; border-color: #e2e8f0; }
+    .btn-secondary:hover { background: #e2e8f0; }
 
-    /* ==============================
-       EMPTY STATE
-       ============================== */
-    .empty-state {
-        text-align: center;
-        padding: 4.5rem 1.5rem;
-        color: #94a3b8;
+    /* Upload loading state */
+    .btn.is-uploading { cursor: progress; opacity: 0.85; }
+    .btn[disabled] { cursor: not-allowed; opacity: 0.65; }
+    .btn .spin { animation: spin 1s linear infinite; }
+    @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+    /* ============================================================
+       ACTION DROPDOWN — opens UPWARD (above the trigger)
+       ============================================================ */
+    .action-dropdown { position: relative; display: inline-block; }
+    .action-dropdown .dropdown-trigger {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        padding: 0.42rem 0.78rem;
+        border: 1px solid #cbd5e1;
+        background: #ffffff;
+        border-radius: 8px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        color: #334155;
+        cursor: pointer;
+        transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+        white-space: nowrap;
     }
+    .action-dropdown .dropdown-trigger:hover {
+        border-color: var(--primary);
+        color: var(--primary);
+        background: var(--primary-light);
+    }
+    .action-dropdown .dropdown-trigger svg.chevron {
+        width: 12px; height: 12px;
+        transition: transform 0.2s ease;
+        transform: rotate(180deg);
+    }
+    .action-dropdown.open .dropdown-trigger svg.chevron { transform: rotate(0deg); }
+
+    .dropdown-menu {
+        display: none;
+        position: fixed; /* Changed from absolute */
+        /* Remove right and bottom, as JS will calculate top/left */
+        min-width: 190px;
+        background: #ffffff;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        box-shadow: 0 -12px 28px -10px rgba(15, 23, 42, 0.25), 0 12px 28px -10px rgba(15, 23, 42, 0.15);
+        z-index: 9999; /* Ensure it sits above everything */
+        padding: 0.35rem;
+        animation: ddIn 0.15s ease;
+    }
+    @keyframes ddIn {
+        from { opacity: 0; transform: translateY(4px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+    .action-dropdown.open .dropdown-menu { display: block; }
+
+    .dropdown-menu .dropdown-item {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        width: 100%;
+        padding: 0.5rem 0.65rem;
+        background: none;
+        border: none;
+        border-radius: 6px;
+        font-size: 0.78rem;
+        font-weight: 500;
+        color: #334155;
+        cursor: pointer;
+        text-align: left;
+        transition: background 0.15s ease;
+    }
+    .dropdown-menu .dropdown-item:hover { background: #f1f5f9; }
+    .dropdown-menu .dropdown-item svg { width: 14px; height: 14px; flex-shrink: 0; color: #64748b; }
+    .dropdown-menu .dropdown-item.text-primary { color: var(--primary); font-weight: 600; }
+    .dropdown-menu .dropdown-item.text-primary:hover { background: var(--primary-light); }
+    .dropdown-menu .dropdown-item.text-primary svg { color: var(--primary); }
+    .dropdown-menu .dropdown-item.text-danger { color: #b91c1c; }
+    .dropdown-menu .dropdown-item.text-danger:hover { background: #fef2f2; }
+    .dropdown-menu .dropdown-item.text-danger svg { color: #ef4444; }
+    .dropdown-menu .dropdown-divider { height: 1px; background: #f1f5f9; margin: 0.25rem 0; }
+
+    .empty-state { text-align: center; padding: 4.5rem 1.5rem; color: #94a3b8; }
     .empty-state-icon {
         width: 84px; height: 84px;
         margin: 0 auto 1.1rem;
@@ -984,9 +1349,6 @@ $extraStyles = "
     }
     .empty-state p { margin: 0; font-weight: 500; font-size: 0.95rem; color: #64748b; }
 
-    /* ==============================
-       ALERTS
-       ============================== */
     .alert {
         padding: 0.9rem 1.2rem;
         border-radius: 8px;
@@ -1004,22 +1366,9 @@ $extraStyles = "
         from { opacity: 0; transform: translateY(-6px); }
         to { opacity: 1; transform: translateY(0); }
     }
-    .alert-success {
-        background: #ecfdf5;
-        color: #047857;
-        border-color: #a7f3d0;
-        border-left-color: #10b981;
-    }
-    .alert-danger {
-        background: #fef2f2;
-        color: #b91c1c;
-        border-color: #fecaca;
-        border-left-color: #ef4444;
-    }
+    .alert-success { background: #ecfdf5; color: #047857; border-color: #a7f3d0; border-left-color: #10b981; }
+    .alert-danger  { background: #fef2f2; color: #b91c1c; border-color: #fecaca; border-left-color: #ef4444; }
 
-    /* ==============================
-       MODAL
-       ============================== */
     .modal {
         display: none;
         position: fixed;
@@ -1109,9 +1458,6 @@ $extraStyles = "
     }
     .modal-section-title { margin: 0 0 1rem; font-weight: 600; color: #334155; }
 
-    /* ==============================
-       FORMS
-       ============================== */
     .form-group { margin-bottom: 1.25rem; }
     .form-group label {
         display: block;
@@ -1135,7 +1481,6 @@ $extraStyles = "
         outline: none;
         border-color: var(--primary);
         box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
-        background: #ffffff;
     }
     .form-control::placeholder { color: #94a3b8; }
     textarea.form-control { resize: vertical; min-height: 74px; }
@@ -1148,9 +1493,6 @@ $extraStyles = "
         margin-top: 1.5rem;
     }
 
-    /* ==============================
-       WORKFLOW CHOICE
-       ============================== */
     .workflow-choice {
         display: grid;
         grid-template-columns: 1fr 1fr;
@@ -1184,7 +1526,6 @@ $extraStyles = "
         background: var(--primary-light);
         color: var(--primary);
         transition: background 0.2s ease, color 0.2s ease;
-        margin: 0;
         box-sizing: content-box;
     }
     .choice-card.selected .choice-icon svg { background: var(--primary); color: #ffffff; }
@@ -1209,9 +1550,6 @@ $extraStyles = "
 
     .hidden { display: none !important; }
 
-    /* ==============================
-       RESPONSIVE
-       ============================== */
     @media (max-width: 1100px) {
         .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
@@ -1224,6 +1562,18 @@ $extraStyles = "
         .data-table th, .data-table td { padding: 0.7rem 0.8rem; font-size: 0.8rem; }
         .workflow-choice { grid-template-columns: 1fr; }
         .btn-group { justify-content: flex-start; }
+        .action-dropdown { width: 100%; }
+        .action-dropdown .dropdown-trigger { width: 100%; justify-content: space-between; }
+        .dropdown-menu {
+            position: static;
+            width: 100%;
+            margin-bottom: 0.35rem;
+            margin-top: 0;
+            box-shadow: none;
+            bottom: auto;
+            top: auto;
+        }
+        .folder-grid { grid-template-columns: 1fr; }
     }
     @media (max-width: 480px) {
         .stats-grid { grid-template-columns: 1fr 1fr; gap: 0.6rem; }
@@ -1256,11 +1606,9 @@ include 'includes/header.php';
 
         <?php include 'includes/success_toast.php'; ?>
 
-        <!-- Main Card -->
         <div class="main-card">
             <div class="card-header">
                 <div class="card-header-left">
-                    
                     <div class="breadcrumb">
                         <a href="program_head_requirements.php"><?= sanitize($deptName) ?></a>
                         <?php
@@ -1279,133 +1627,74 @@ include 'includes/header.php';
                     </div>
                 </div>
                 <div class="card-header-right">
-                    <span class="count-chip"><?= count($contents) ?> items</span>
+                    <span class="count-chip"><?= $totalItems ?> items</span>
                 </div>
             </div>
 
             <div class="card-body no-padding">
-                <?php if (empty($contents)): ?>
+                <?php if ($totalItems === 0): ?>
                     <div class="empty-state">
                         <div class="empty-state-icon"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></div>
                         <p>This folder is empty.</p>
                     </div>
                 <?php else: ?>
-                    <div class="table-responsive">
-                        <table class="data-table">
-                            <thead>
-                                <tr>
-                                    <th>Name</th>
-                                    <th>Type</th>
-                                    <th>Deadline</th>
-                                    <th>Status</th>
-                                    <th>Action</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <?php foreach ($contents as $item): ?>
-                                    <?php if ($item['is_folder']): ?>
-                                        <tr class="folder-row" data-row-id="req_folder:<?= (int)$item['id'] ?>" data-href="program_head_requirements.php?folder=<?= $item['id'] ?>">
-                                            <td>
-                                                <div class="name-wrap">
-                                                    <span class="folder-chip"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 4H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg></span>
-                                                    <a class="folder-link" href="program_head_requirements.php?folder=<?= $item['id'] ?>">
-                                                        <?= sanitize($item['name']) ?>
-                                                    </a>
+                    
+                    <?php if (!empty($folderContents)): ?>
+                        <div class="folders-section">
+                            <div class="folder-grid">
+                                <?php foreach ($folderContents as $folder): ?>
+                                    <a href="program_head_requirements.php?folder=<?= $folder['id'] ?>" class="folder-card">
+                                        <div class="folder-card-left">
+                                            <div class="folder-icon-wrapper">
+                                                <svg class="folder-icon-svg" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                                    <path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/>
+                                                </svg>
+                                            </div>
+                                            <div class="folder-info">
+                                                <div class="folder-title"><?= sanitize($folder['name']) ?></div>
+                                                <div class="folder-meta">
+                                                    <?= (int)$folder['req_count'] ?> <?= (int)$folder['req_count'] === 1 ? 'requirement' : 'requirements' ?>
                                                 </div>
-                                            </td>
-                                            <td><span class="badge badge-folder">Folder</span></td>
-                                            <td>—</td>
-                                            <td>—</td>
-                                            <td></td>
-                                        </tr>
-                                    <?php else: ?>
-                                        <?php
-                                            $req = $item;
-                                            // Aggregate "Complete" check → shows as "Approved" for the PH
-                                            $isComplete = isRequirementComplete($req);
-                                            $state = resolvePhReqState($req['current_status'] ?? null, $req['tr_id'] ?? null, $isComplete, (int)($req['direct_rejected_count'] ?? 0), (int)($req['direct_pending_count'] ?? 0));
-                                            $sl = [$state['label'], $state['class']];
-                                            $expired = $req['expiration_date'] && strtotime($req['expiration_date']) < time();
-                                            $isAssigned = !empty($req['tr_id']);
-                                            $showManageBtn = !$state['blocked'];
-                                            $buttonLabel = 'Manage';
-                                        ?>
-                                        <tr data-row-id="requirement:<?= (int)$req['id'] ?>">
-                                            <td>
-                                                <div>
-                                                    <strong class="req-category"><?= sanitize($req['category']) ?></strong>
-                                                    <span class="req-doc"><?= sanitize($req['document_type']) ?></span>
-                                                </div>
-                                            </td>
-                                            <td>
-                                                <span class="badge <?= $req['mandatory'] ? 'badge-required' : 'badge-optional' ?>">
-                                                    <?= $req['mandatory'] ? 'Required' : 'Optional' ?>
-                                                </span>
-                                            </td>
-                                            <td>
-                                                <?php if ($req['expiration_date']): ?>
-                                                    <span class="<?= $expired ? 'text-danger' : '' ?>">
-                                                        <?= date('M j, Y', strtotime($req['expiration_date'])) ?>
-                                                    </span>
-                                                    <?php if ($expired): ?>
-                                                        <span class="badge badge-rejected" style="margin-left:0.5rem;">Expired</span>
-                                                    <?php endif; ?>
-                                                <?php else: ?>
-                                                    —
-                                                <?php endif; ?>
-                                            </td>
-                                            <td><span class="badge <?= $sl[1] ?>"><?= $sl[0] ?></span></td>
-                                            <td>
-                                                <div class="btn-group">
-                                                    <?php if ($showManageBtn): ?>
-                                                        <button class="btn btn-sm btn-primary action-btn"
-                                                                data-id="<?= $req['id'] ?>"
-                                                                data-name="<?= sanitize($req['category'] . ' - ' . $req['document_type']) ?>"
-                                                                data-state="<?= $state['key'] ?>"
-                                                                data-assigned="<?= $isAssigned ? '1' : '0' ?>"
-                                                                data-trid="<?= $req['tr_id'] ?? '' ?>"
-                                                                data-can-unassign="<?= $state['can_unassign'] ? '1' : '0' ?>"
-                                                                data-can-upload="<?= $state['can_upload'] ? '1' : '0' ?>"
-                                                                data-can-assign="<?= $state['can_assign'] ? '1' : '0' ?>"
-                                                                data-rejected="<?= $state['key'] === 'rejected' ? '1' : '0' ?>">
-                                                            <?= $buttonLabel ?>
-                                                        </button>
-                                                    <?php endif; ?>
-                                                    <?php if (!empty(trim((string)($req['description'] ?? '')))): ?>
-                                                        <button type="button" class="btn btn-sm btn-secondary desc-btn"
-                                                                data-name="<?= sanitize($req['category'] . ' - ' . $req['document_type']) ?>"
-                                                                data-desc="<?= sanitize($req['description']) ?>">
-                                                            Description
-                                                        </button>
-                                                    <?php endif; ?>
-                                                    <?php if ($req['doc_id']): ?>
-                                                        <button type="button" class="btn btn-sm btn-secondary view-btn"
-                                                                data-id="<?= $req['doc_id'] ?>"
-                                                                data-type="document"
-                                                                data-filename="<?= sanitize($req['filename'] ?? '') ?>"
-                                                                data-title="<?= sanitize($req['category'] . ' - ' . $req['document_type']) ?>"
-                                                                style="cursor:pointer;">
-                                                            View
-                                                        </button>
-                                                    <?php endif; ?>
-                                                </div>
-                                            </td>
-                                        </tr>
-                                    <?php endif; ?>
+                                            </div>
+                                        </div>
+                                        <svg class="folder-chevron" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                                            <path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
+                                        </svg>
+                                    </a>
                                 <?php endforeach; ?>
-                            </tbody>
-                        </table>
-                    </div>
+                            </div>
+                        </div>
+                    <?php endif; ?>
+
+                    <?php if (!empty($reqContents)): ?>
+                        <div class="table-responsive">
+                            <table class="data-table" data-dept-id="<?= (int)$deptId ?>">
+                                <thead>
+                                    <tr>
+                                        <th>Name</th>
+                                        <th>Type</th>
+                                        <th>Deadline</th>
+                                        <th>Status</th>
+                                        <th>Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php foreach ($reqContents as $req): ?>
+                                        <?= renderPhReqRow($req) ?>
+                                    <?php endforeach; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    <?php endif; ?>
+
                 <?php endif; ?>
             </div>
         </div>
 
-    </div><!-- /.dashboard-container -->
-</div><!-- /.content-area -->
+    </div>
+</div>
 
-<!-- ============================================================================
-     MODAL
-     ============================================================================ -->
+<!-- Manage modal -->
 <div id="reqModal" class="modal">
     <div class="modal-content">
         <div class="modal-header">
@@ -1414,7 +1703,7 @@ include 'includes/header.php';
         </div>
         <div class="modal-body">
             <p id="modalReqName" class="modal-req-name"></p>
-            
+
             <div id="workflowSelection">
                 <p class="modal-section-title">How would you like to handle this requirement?</p>
                 <div class="workflow-choice">
@@ -1423,7 +1712,7 @@ include 'includes/header.php';
                             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
                         </span>
                         <span class="choice-title">Upload Personally</span>
-                        <span class="choice-desc">You will upload the document yourself.</span>
+                        <span class="choice-desc">You will upload the document yourself. It is saved as a draft first.</span>
                     </div>
                     <div class="choice-card" id="choiceTeacher" data-csp-action="selectPath" data-csp-args='["teacher"]'>
                         <span class="choice-icon">
@@ -1436,7 +1725,7 @@ include 'includes/header.php';
             </div>
 
             <div id="uploadSection" class="hidden">
-                <form method="POST" enctype="multipart/form-data">
+                <form method="POST" enctype="multipart/form-data" id="uploadDraftForm">
                     <?= csrfField() ?>
                     <input type="hidden" name="action" value="upload_personal">
                     <input type="hidden" name="requirement_id" id="upload_req_id">
@@ -1446,12 +1735,12 @@ include 'includes/header.php';
                                accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.gif,.webp,.xls,.xlsx,.ppt,.pptx" required>
                     </div>
                     <div class="form-group">
-                        <label>Comment </label>
+                        <label>Comment</label>
                         <textarea name="comment" class="form-control" rows="2" placeholder="Notes for Admin..."></textarea>
                     </div>
                     <div class="modal-actions">
                         <button type="button" class="btn btn-secondary" data-csp-action="resetModal">Back</button>
-                        <button type="submit" class="btn btn-primary">Upload</button>
+                        <button type="submit" class="btn btn-primary" id="uploadDraftBtn">Save Draft</button>
                     </div>
                 </form>
             </div>
@@ -1462,7 +1751,7 @@ include 'includes/header.php';
                     <input type="hidden" name="action" value="assign">
                     <input type="hidden" name="requirement_id" id="assign_req_id">
                     <div class="form-group">
-                                <label>Select Faculty</label>
+                        <label>Select Faculty</label>
                         <select name="teacher_id" class="form-control" required>
                             <option value="">-- Select Faculty --</option>
                             <?php foreach ($teachers as $t): ?>
@@ -1471,7 +1760,7 @@ include 'includes/header.php';
                         </select>
                     </div>
                     <div class="form-group">
-                        <label>Deadline </label>
+                        <label>Deadline</label>
                         <div class="deadline-wrap" style="position:relative">
                             <input type="text" name="deadline" class="form-control req-deadline" placeholder="MM/DD/YYYY" pattern="[0-9]{2}/[0-9]{2}/[0-9]{4}">
                             <input type="date" class="req-deadline-picker" style="position:absolute;top:0;left:0;width:100%;height:100%;opacity:0;cursor:pointer">
@@ -1492,18 +1781,9 @@ include 'includes/header.php';
                         <input type="hidden" name="requirement_id" id="active_req_id">
                         <input type="hidden" name="tr_id" id="active_tr_id">
                         <input type="hidden" name="action" id="active_action">
-                        <button type="submit"
-                                id="resetBtn"
-                                class="btn btn-danger">
-                            Remove
-                        </button>
+                        <button type="submit" id="resetBtn" class="btn btn-danger">Remove</button>
                     </form>
-                    <button type="button"
-                            id="activeUploadBtn"
-                            class="btn btn-primary hidden"
-                            data-csp-action="openUploadFromActive">
-                        Upload Personally
-                    </button>
+                    <button type="button" id="activeUploadBtn" class="btn btn-primary hidden" data-csp-action="openUploadFromActive">Upload Personally</button>
                 </div>
             </div>
         </div>
@@ -1527,7 +1807,7 @@ include 'includes/header.php';
     </div>
 </div>
 
-<!-- Confirm modal (replaces native confirm) -->
+<!-- Confirm modal -->
 <div id="confirmModal" class="modal" style="z-index: 3000;">
     <div class="modal-content" style="max-width: 420px;">
         <div class="modal-header">
@@ -1545,6 +1825,7 @@ include 'includes/header.php';
 </div>
 
 <script nonce="<?= csp_nonce() ?>">
+    const csrfToken = '<?= getCsrfToken() ?>';
     const modal_req = document.getElementById('reqModal');
     const selection = document.getElementById('workflowSelection');
     const uploadSection = document.getElementById('uploadSection');
@@ -1582,8 +1863,6 @@ include 'includes/header.php';
         const activeInfo = document.getElementById('activeInfo');
         const activeAction = document.getElementById('active_action');
 
-        // Pending PH / Pending Admin / Approved: Manage is not shown (blocked).
-        // Defensive: if reached, show read-only info with no actions.
         if (state === 'pending_ph' || state === 'pending_admin' || state === 'approved') {
             selection.classList.add('hidden');
             uploadSection.classList.add('hidden');
@@ -1599,7 +1878,6 @@ include 'includes/header.php';
             uploadBtn.classList.add('hidden');
             document.getElementById('modalTitle').textContent = 'Manage Requirement';
         }
-        // Assigned or Rejected with assignment: offer remove + optional personal upload.
         else if (canUnassign && assigned) {
             selection.classList.add('hidden');
             uploadSection.classList.add('hidden');
@@ -1622,13 +1900,11 @@ include 'includes/header.php';
             }
             document.getElementById('modalTitle').textContent = 'Manage Requirement';
         }
-        // Unassigned (not_uploaded or rejected personal): workflow choice.
         else {
             selection.classList.remove('hidden');
             uploadSection.classList.add('hidden');
             assignSection.classList.add('hidden');
             activeSection.classList.add('hidden');
-            // Hide cards the state does not permit.
             document.getElementById('choicePH').style.display = canUpload ? '' : 'none';
             document.getElementById('choiceTeacher').style.display = canAssign ? '' : 'none';
             document.getElementById('modalTitle').textContent = 'Manage Requirement';
@@ -1638,9 +1914,64 @@ include 'includes/header.php';
         modal_req.style.display = 'flex';
     }
 
+    function bindRowHandlers(row) {
+        if (!row) return;
+        row.querySelectorAll('.action-btn').forEach(btn => {
+            btn.addEventListener('click', function () { openManageModal(this); });
+        });
+        row.querySelectorAll('.desc-btn').forEach(btn => {
+            btn.addEventListener('click', function () { openDescModal(this); });
+        });
+        row.querySelectorAll('.action-dropdown .dropdown-trigger').forEach(trigger => {
+            trigger.addEventListener('click', dropdownToggleHandler);
+        });
+        row.querySelectorAll('.action-dropdown .dropdown-item').forEach(item => {
+            item.addEventListener('click', () => {
+                item.closest('.action-dropdown')?.classList.remove('open');
+            });
+        });
+    }
+
+    // Rows rendered server-side never pass through bindRowHandlers (SSE-only), so bind them once here.
     document.querySelectorAll('.action-btn').forEach(btn => {
-        btn.addEventListener('click', function() { openManageModal(this); });
+        btn.addEventListener('click', function () { openManageModal(this); });
     });
+
+    function dropdownToggleHandler(e) {
+        e.stopPropagation();
+        const trigger = this;
+        const dd = trigger.closest('.action-dropdown');
+        const menu = dd.querySelector('.dropdown-menu');
+        const wasOpen = dd.classList.contains('open');
+        
+        // Close all other dropdowns
+        document.querySelectorAll('.action-dropdown.open').forEach(d => d.classList.remove('open'));
+        
+        if (wasOpen) return;
+
+        // Open this dropdown
+        dd.classList.add('open');
+
+        // Calculate exact screen coordinates
+        const rect = trigger.getBoundingClientRect();
+        
+        // Reset styles to measure natural height
+        menu.style.visibility = 'hidden';
+        menu.style.display = 'block';
+        const mh = menu.offsetHeight;
+        const mw = menu.offsetWidth;
+        menu.style.display = '';
+        menu.style.visibility = '';
+
+        // Position it ABOVE the trigger button
+        const top = rect.top - mh - 4; // 4px gap
+        const left = rect.right - mw;  // Align right edges
+
+        // Apply fixed positions
+        menu.style.left = Math.max(8, left) + 'px';
+        // If there's no room above, open downwards instead
+        menu.style.top = top < 8 ? (rect.bottom + 4) + 'px' : top + 'px';
+    }
 
     function openDescModal(btn) {
         document.getElementById('descReqName').textContent = btn.dataset.name || '';
@@ -1650,7 +1981,7 @@ include 'includes/header.php';
         m.style.display = 'flex';
     }
     document.querySelectorAll('.desc-btn').forEach(btn => {
-        btn.addEventListener('click', function() { openDescModal(this); });
+        btn.addEventListener('click', function () { openDescModal(this); });
     });
 
     function selectPath(path) {
@@ -1682,7 +2013,92 @@ include 'includes/header.php';
         document.querySelector('#assignSection select').value = '';
         const deadlineInput = document.querySelector('#assignSection .req-deadline');
         if (deadlineInput) deadlineInput.value = '';
+        // Reset the upload ("Save Draft") button back to its idle state.
+        resetUploadDraftButton();
     }
+
+    document.querySelectorAll('.action-dropdown .dropdown-trigger').forEach(trigger => {
+        trigger.addEventListener('click', dropdownToggleHandler);
+    });
+    document.querySelectorAll('.action-dropdown .dropdown-item').forEach(item => {
+        item.addEventListener('click', () => {
+            item.closest('.action-dropdown')?.classList.remove('open');
+        });
+    });
+    document.addEventListener('click', e => {
+        if (!e.target.closest('.action-dropdown')) {
+            document.querySelectorAll('.action-dropdown.open').forEach(d => d.classList.remove('open'));
+        }
+    });
+    document.addEventListener('keydown', e => {
+        if (e.key === 'Escape') {
+            document.querySelectorAll('.action-dropdown.open').forEach(d => d.classList.remove('open'));
+        }
+    });
+
+    window.__submitDraft = function () {
+        if (!confirm('Submit this document to Admin for review?\nYou will not be able to edit it until it is returned.')) return;
+        const b = this, orig = b.innerHTML;
+        b.disabled = true;
+        const fd = new FormData();
+        fd.append('action', 'submit_draft');
+        fd.append('document_id', this.dataset.id);
+        fd.append('csrf_token', csrfToken);
+        fetch(window.location.href, { method: 'POST', body: fd, credentials: 'include' })
+            .then(r => r.json().catch(() => ({ success: false, message: 'Server error.' })))
+            .then(d => {
+                if (d.success) { location.reload(); }
+                else { b.innerHTML = orig; b.disabled = false; alert(d.message || 'Failed.'); }
+            })
+            .catch(err => { b.innerHTML = orig; b.disabled = false; alert('Submit failed: ' + err.message); });
+    };
+    document.querySelectorAll('.submit-draft-btn').forEach(btn => {
+        btn.addEventListener('click', window.__submitDraft);
+    });
+
+    window.__deleteDraft = function () {
+        if (!confirm('Delete this draft? This cannot be undone.')) return;
+        const b = this, orig = b.innerHTML;
+        b.disabled = true;
+        const fd = new FormData();
+        fd.append('action', 'delete_draft');
+        fd.append('document_id', this.dataset.id);
+        fd.append('csrf_token', csrfToken);
+        fetch(window.location.href, { method: 'POST', body: fd, credentials: 'include',
+            headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+            .then(r => r.json().catch(() => ({ success: false, message: 'Server error.' })))
+            .then(d => {
+                if (d.success) {
+                    const m = document.getElementById('successModal');
+                    if (m) {
+                        document.getElementById('successMsg').textContent = d.message || 'Draft deleted.';
+                        m.classList.add('active');
+                        m.setAttribute('aria-hidden', 'false');
+                    }
+                    setTimeout(() => location.reload(), 800);
+                }
+                else { b.innerHTML = orig; b.disabled = false; alert(d.message || d.error || 'Failed.'); }
+            })
+            .catch(err => { b.innerHTML = orig; b.disabled = false; alert('Delete failed: ' + err.message); });
+    };
+    document.querySelectorAll('.delete-draft-btn').forEach(btn => {
+        btn.addEventListener('click', window.__deleteDraft);
+    });
+
+    window.__changeDraft = function () {
+        resetModal();
+        document.getElementById('upload_req_id').value = this.dataset.reqid;
+        document.getElementById('modalReqName').textContent = this.dataset.label;
+        selection.classList.add('hidden');
+        assignSection.classList.add('hidden');
+        activeSection.classList.add('hidden');
+        uploadSection.classList.remove('hidden');
+        modal_req.classList.add('show');
+        modal_req.style.display = 'flex';
+    };
+    document.querySelectorAll('.change-draft-btn').forEach(btn => {
+        btn.addEventListener('click', window.__changeDraft);
+    });
 
     document.querySelectorAll('.close-btn[data-modal="reqModal"]').forEach(b => {
         b.addEventListener('click', () => {
@@ -1699,7 +2115,6 @@ include 'includes/header.php';
         });
     });
 
-    // Confirm modal — intercept destructive form submit
     let pendingConfirmForm = null;
     const confirmModal = document.getElementById('confirmModal');
 
@@ -1729,7 +2144,7 @@ include 'includes/header.php';
             return;
         }
         e.preventDefault();
-        openConfirmModal(this, 'This will remove the current assignment/upload. Continue?');
+        openConfirmModal(this, 'This will remove the current assignment. Continue?');
     });
 
     document.getElementById('confirmOkBtn').addEventListener('click', () => {
@@ -1740,7 +2155,6 @@ include 'includes/header.php';
             form.requestSubmit();
         }
     });
-    // Cancel / X / backdrop → only close Confirm; Manage stays closed
     document.getElementById('confirmCancelBtn').addEventListener('click', closeConfirmModal);
     document.querySelectorAll('.close-btn[data-modal="confirmModal"]').forEach(b => {
         b.addEventListener('click', closeConfirmModal);
@@ -1754,14 +2168,6 @@ include 'includes/header.php';
             modal_req.classList.remove('show');
             setTimeout(() => modal_req.style.display = 'none', 300);
         }
-    });
-
-    document.querySelectorAll('.folder-row').forEach(row => {
-        row.addEventListener('click', function(e) {
-            if (e.target.closest('a')) return;
-            const href = this.dataset.href;
-            if (href) window.location.href = href;
-        });
     });
 
     document.querySelectorAll('.deadline-wrap').forEach(wrap => {
@@ -1778,16 +2184,137 @@ include 'includes/header.php';
             input.value = p.length === 3 ? p[1] + '/' + p[2] + '/' + p[0] : picker.value;
         });
     });
-</script>
 
-<script nonce="<?= csp_nonce() ?>">
-    // ponytail: full-page reload instead of 1s AJAX poll (single server-rendered query, nothing to drift); skips reload when a modal is open, 30s interval
-    setInterval(function () { if (!document.querySelector(".modal.show")) location.reload(); }, 30000);
+    /* =======================================================================
+       UPLOAD ("Save Draft"): loading state + duplicate-submit prevention
+       Applies to both program head and unit head, since both roles render
+       this same form/button. The loading indicator stays visible until the
+       server responds (the upload — including R2 storage — happens during
+       the POST).
+       ======================================================================= */
+    const uploadDraftForm = document.getElementById('uploadDraftForm');
+    const uploadDraftBtn  = document.getElementById('uploadDraftBtn');
+    const uploadDraftOriginalHtml = uploadDraftBtn ? uploadDraftBtn.innerHTML : '';
+
+    const SPINNER_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="spin"><line x1="12" x2="12" y1="2" y2="6"/><line x1="12" x2="12" y1="18" y2="22"/><line x1="4.93" x2="7.76" y1="4.93" y2="7.76"/><line x1="16.24" x2="19.07" y1="16.24" y2="19.07"/><line x1="2" x2="6" y1="12" y2="12"/><line x1="18" x2="22" y1="12" y2="12"/><line x1="4.93" x2="7.76" y1="19.07" y2="16.24"/><line x1="16.24" x2="19.07" y1="7.76" y2="4.93"/></svg>';
+
+    function setUploadDraftLoading() {
+        if (!uploadDraftBtn) return;
+        uploadDraftBtn.disabled = true;
+        uploadDraftBtn.classList.add('is-uploading');
+        uploadDraftBtn.setAttribute('aria-busy', 'true');
+        uploadDraftBtn.innerHTML = SPINNER_SVG + ' Uploading...';
+    }
+
+    function resetUploadDraftButton() {
+        if (!uploadDraftBtn) return;
+        uploadDraftBtn.disabled = false;
+        uploadDraftBtn.classList.remove('is-uploading');
+        uploadDraftBtn.removeAttribute('aria-busy');
+        uploadDraftBtn.innerHTML = uploadDraftOriginalHtml;
+    }
+
+    if (uploadDraftForm && uploadDraftBtn) {
+        uploadDraftForm.addEventListener('submit', function (e) {
+            // Let native validation block invalid submissions first.
+            if (typeof uploadDraftForm.reportValidity === 'function' && !uploadDraftForm.reportValidity()) {
+                e.preventDefault();
+                return;
+            }
+            // Prevent double-submit: if we're already uploading, block.
+            if (uploadDraftBtn.disabled) {
+                e.preventDefault();
+                return;
+            }
+            // Show the loading state immediately. Because this is a full-page
+            // form submit, the indicator remains visible until the server
+            // responds (covering the R2 upload window).
+            setUploadDraftLoading();
+
+            // bfcache safety: restore the button if the user navigates back.
+            window.addEventListener('pageshow', function onPageShow(evt) {
+                if (evt.persisted) {
+                    resetUploadDraftButton();
+                }
+            }, { once: true });
+        });
+    }
+
+    /* =======================================================================
+       SSE: Selective real-time updates. Never reloads the page.
+       ======================================================================= */
+    (function () {
+        'use strict';
+
+        const tbody = document.querySelector('.data-table tbody');
+        if (!tbody) return;
+
+        let lastEventId = 0;
+
+        async function fetchRowHtml(reqId) {
+            const url = `program_head_requirements.php?render=row&id=${encodeURIComponent(reqId)}`;
+            const r = await fetch(url, { credentials: 'include', headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            if (!r.ok) return null;
+            const data = await r.json().catch(() => null);
+            return data && typeof data.html === 'string' ? data.html : null;
+        }
+
+        function removeRow(reqId) {
+            const row = tbody.querySelector(`tr[data-requirement-id="${reqId}"]`);
+            if (row) row.remove();
+        }
+
+        function insertRowSorted(newRow) {
+            const key = newRow.dataset.sortKey || '';
+            const rows = [...tbody.querySelectorAll('tr[data-requirement-id]')];
+            const before = rows.find(r => (r.dataset.sortKey || '') > key);
+            if (before) tbody.insertBefore(newRow, before);
+            else tbody.appendChild(newRow);
+        }
+
+        async function upsertRow(reqId) {
+            if (!reqId) return;
+            const html = await fetchRowHtml(reqId);
+            if (!html) { removeRow(reqId); return; }
+
+            const existing = tbody.querySelector(`tr[data-requirement-id="${reqId}"]`);
+            const tpl = document.createElement('tbody');
+            tpl.innerHTML = html.trim();
+            const newRow = tpl.firstElementChild;
+            if (!newRow) return;
+
+            if (existing) {
+                existing.replaceWith(newRow);
+            } else {
+                insertRowSorted(newRow);
+            }
+            bindRowHandlers(newRow);
+        }
+
+        const es = new EventSource('program_head_requirements.php?stream=1' +
+                                   (lastEventId ? `&last_id=${lastEventId}` : ''));
+
+        const onEvent = (ev) => {
+            let d; try { d = JSON.parse(ev.data); } catch { return; }
+            if (d._id && d._id <= lastEventId) return;
+            if (d._id) lastEventId = d._id;
+
+            const rid = parseInt(d.req_id || d.reqId || 0, 10);
+            if (!rid) return;
+
+            if (ev.type === 'requirement.deleted') {
+                removeRow(rid);
+            } else {
+                upsertRow(rid);
+            }
+        };
+
+        ['requirement.assigned','requirement.uploaded','requirement.unassigned',
+         'requirement.status_changed','requirement.upload_removed','requirement.deleted']
+            .forEach(t => es.addEventListener(t, onEvent));
+
+        es.onerror = () => { /* auto-reconnects; never reload */ };
+    })();
 </script>
 
 <?php include 'includes/footer.php'; ?>
-
-
-
-
-
