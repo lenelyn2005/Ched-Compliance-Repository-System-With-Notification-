@@ -540,10 +540,12 @@ $rejectedAllQuery = "
     FROM documents d
     LEFT JOIN teacher_requirements tr ON d.teacher_requirement_id = tr.id
     LEFT JOIN department_requirements dr ON tr.requirement_id = dr.id AND dr.department_id = ?
-    LEFT JOIN ph_repository pr ON d.id = pr.document_id AND pr.department_id = ? AND pr.program_head_id = ?
+    LEFT JOIN ph_repository pr ON pr.id = (
+        SELECT MAX(pr_latest.id) FROM ph_repository pr_latest
+        WHERE pr_latest.document_id = d.id AND pr_latest.department_id = ? AND pr_latest.program_head_id = ?
+    )
     WHERE d.uploaded_by = ? AND d.status = 'rejected_admin' AND d.archived = 0
     AND d.file_path IS NOT NULL AND d.file_path != ''
-    GROUP BY d.id
     ORDER BY d.reviewed_at_admin DESC
 ";
 $rejectedAllStmt = $pdo->prepare($rejectedAllQuery);
