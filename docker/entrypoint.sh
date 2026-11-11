@@ -33,5 +33,11 @@ mkdir -p /var/www/html/logs /var/www/html/system/storage/cache /var/www/html/upl
 chown -R www-data:www-data /var/www/html/logs /var/www/html/system /var/www/html/uploads \
          /var/www/html/websocket /var/www/storage /tmp/ched_temp
 
+# --- Schema patch: 'draft' status enum (idempotent) ---------------------------
+# Old databases lack 'draft' in documents.status / ph_documents.status, which
+# makes teacher draft uploads fail under strict mode. Never block boot on it.
+php /var/www/html/scripts/migrate_draft_status.php \
+    || echo "[entrypoint] WARNING: draft-status migration failed (continuing)." >&2
+
 export PORT="${PORT:-10000}"
 exec /usr/bin/supervisord -c /etc/supervisor/supervisord.conf
