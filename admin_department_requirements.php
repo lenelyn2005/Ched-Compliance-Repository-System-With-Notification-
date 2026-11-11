@@ -482,10 +482,10 @@ if ($deptId) {
     }
 
     if ($currentFolderId) {
-        $stmt = $pdo->prepare('SELECT id, folder_name as name, created_at, "folder" as type FROM department_folders WHERE department_id = ? AND parent_folder_id = ? AND LOWER(folder_name) <> \'root\' ORDER BY folder_name');
+        $stmt = $pdo->prepare('SELECT id, folder_name as name, created_at, \'folder\' as type FROM department_folders WHERE department_id = ? AND parent_folder_id = ? AND LOWER(folder_name) <> \'root\' ORDER BY folder_name');
         $stmt->execute([$deptId, $currentFolderId]);
     } else {
-        $stmt = $pdo->prepare('SELECT id, folder_name as name, created_at, "folder" as type FROM department_folders WHERE department_id = ? AND parent_folder_id IS NULL AND LOWER(folder_name) <> \'root\' ORDER BY folder_name');
+        $stmt = $pdo->prepare('SELECT id, folder_name as name, created_at, \'folder\' as type FROM department_folders WHERE department_id = ? AND parent_folder_id IS NULL AND LOWER(folder_name) <> \'root\' ORDER BY folder_name');
         $stmt->execute([$deptId]);
     }
     $foldersInFolder = $stmt->fetchAll();

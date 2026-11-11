@@ -1029,10 +1029,10 @@ if ($currentFolderId) {
 
 // Subfolders
 if ($currentFolderId) {
-    $stmt = $pdo->prepare('SELECT id, folder_name as name, created_at, "folder" as type FROM ph_repo_folders WHERE (department_id = ?) AND program_head_id = ? AND parent_folder_id = ? ORDER BY folder_name');
+    $stmt = $pdo->prepare('SELECT id, folder_name as name, created_at, \'folder\' as type FROM ph_repo_folders WHERE (department_id = ?) AND program_head_id = ? AND parent_folder_id = ? ORDER BY folder_name');
     $stmt->execute([$deptId, $phId, $currentFolderId]);
 } else {
-    $stmt = $pdo->prepare('SELECT id, folder_name as name, created_at, "folder" as type FROM ph_repo_folders WHERE (department_id = ?) AND program_head_id = ? AND parent_folder_id IS NULL ORDER BY folder_name');
+    $stmt = $pdo->prepare('SELECT id, folder_name as name, created_at, \'folder\' as type FROM ph_repo_folders WHERE (department_id = ?) AND program_head_id = ? AND parent_folder_id IS NULL ORDER BY folder_name');
     $stmt->execute([$deptId, $phId]);
 }
 $foldersInFolder = $stmt->fetchAll();
